@@ -21,7 +21,6 @@ typedef __printf(1, 0) int (*printk_func_t)(const char *fmt, va_list args);
 int __printf(1, 0) vprintk_default(const char *fmt, va_list args);
 
 #ifdef CONFIG_PRINTK_NMI
-
 extern raw_spinlock_t logbuf_lock;
 
 /*

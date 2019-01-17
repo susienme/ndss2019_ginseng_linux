@@ -296,18 +296,6 @@
 			status = "disabled";
 		};
 
-		uart2: uart@f7112000 {
-			compatible = "arm,pl011", "arm,primecell";
-			reg = <0x0 0xf7112000 0x0 0x1000>;
-			interrupts = <GIC_SPI 38 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&sys_ctrl HI6220_UART2_PCLK>,
-				 <&sys_ctrl HI6220_UART2_PCLK>;
-			clock-names = "uartclk", "apb_pclk";
-			pinctrl-names = "default";
-			pinctrl-0 = <&uart2_pmx_func &uart2_cfg_func>;
-			status = "disabled";
-		};
-
 		uart3: uart@f7113000 {
 			compatible = "arm,pl011", "arm,primecell";
 			reg = <0x0 0xf7113000 0x0 0x1000>;

@@ -28,7 +28,7 @@
  *	x0 - dest
  *	x1 - src
  */
-ENTRY(copy_page)
+/*ENTRY(copy_page)
 alternative_if ARM64_HAS_NO_HW_PREFETCH
 	# Prefetch two cache lines ahead.
 	prfm    pldl1strm, [x1, #128]
@@ -85,4 +85,4 @@ alternative_else_nop_endif
 	stnp	x16, x17, [x0, #112]
 
 	ret
-ENDPROC(copy_page)
+ENDPROC(copy_page)*/

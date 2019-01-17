@@ -224,7 +224,7 @@ static void send_user_sigtrap(int si_code)
 }
 
 static int single_step_handler(unsigned long addr, unsigned int esr,
-			       struct pt_regs *regs)
+			       struct pt_regs *regs, unsigned long long unused)
 {
 	/*
 	 * If we are stepping a pending breakpoint, call the hw_breakpoint
@@ -302,7 +302,7 @@ static int call_break_hook(struct pt_regs *regs, unsigned int esr)
 NOKPROBE_SYMBOL(call_break_hook);
 
 static int brk_handler(unsigned long addr, unsigned int esr,
-		       struct pt_regs *regs)
+		       struct pt_regs *regs, unsigned long long unused)
 {
 	if (user_mode(regs)) {
 		send_user_sigtrap(TRAP_BRKPT);

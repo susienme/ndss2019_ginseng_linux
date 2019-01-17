@@ -47,6 +47,12 @@ extern void __pmd_error(const char *file, int line, unsigned long val);
 extern void __pud_error(const char *file, int line, unsigned long val);
 extern void __pgd_error(const char *file, int line, unsigned long val);
 
+extern unsigned long long findOA(unsigned long long addr, int bKaddr, const char* blanks, const char* who, int bCheckAP, int *pIsBlock, int bSilent, int bUseMyprintk);
+extern int ginseng_bReadonlyTables;
+
+#include <linux/arm-smccc.h>
+#include <linux/ginseng_smc_cmd.h>
+
 /*
  * ZERO_PAGE is a global shared page that is always zero: used
  * for zero-mapped memory areas etc..
@@ -99,13 +105,38 @@ extern unsigned long empty_zero_page[PAGE_SIZE / sizeof(unsigned long)];
 
 static inline pte_t clear_pte_bit(pte_t pte, pgprot_t prot)
 {
+#ifdef USE_EL3_ALWAYS
+	if (system_state == SYSTEM_RUNNING) {
+		pte_t newPte;
+		pte_val(newPte) = pte_val(pte) & ~pgprot_val(prot);
+		dc_invalidate_single(&pte);	// This makes the SW change the real data in mem not in cache.
+		ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) &pte, pte_val(newPte), 0, 0, 0);
+		if (pte_val(pte) != pte_val(newPte)) panic("CLEAR_PTE_BIT ERROR\n");
+	} else {
+		pte_val(pte) &= ~pgprot_val(prot);
+	}
+#else
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) &pte, 1 /*bKaddr*/, "[CHECK_AP] ", "PTE", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		pte_t newPte;
+		pte_val(newPte) = pte_val(pte) & ~pgprot_val(prot);
+		if (ap & 0b10) {
+			dc_invalidate_single(&pte);	// This makes the SW change the real data in mem not in cache.
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) &pte, pte_val(newPte), 0, 0, 0);
+			if (pte_val(pte) != pte_val(newPte)) panic("CLEAR_PTE_BIT ERROR\n");
+		} else {
+			pte_val(pte) = pte_val(newPte);
+		}
+	} else
+
 	pte_val(pte) &= ~pgprot_val(prot);
+#endif
 	return pte;
 }
 
 static inline pte_t set_pte_bit(pte_t pte, pgprot_t prot)
 {
-	pte_val(pte) |= pgprot_val(prot);
+	pte_val(pte) |= pgprot_val(prot);	// <------------------- NEED TO CHANGE TO SMC CALL
 	return pte;
 }
 
@@ -170,9 +201,44 @@ static inline pmd_t pmd_mkcont(pmd_t pmd)
 	return __pmd(pmd_val(pmd) | PMD_SECT_CONT);
 }
 
+/*static int isMapped(unsigned long long vaddr) {
+	unsigned long long rtn;
+
+	asm volatile(
+		"at s1e1r, %[vaddr]\n"
+		"mrs %[rtn], par_el1\n"
+		: [rtn] "=r" (rtn)
+		: [vaddr] "r" (vaddr)
+		: "memory", "x4");
+
+	return !(rtn & 1ULL);
+}*/
+
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
+#ifdef USE_EL3_ALWAYS
+	if (system_state == SYSTEM_RUNNING) {
+		dc_invalidate_single(ptep);	// This makes the SW change the real data in mem not in cache.
+		ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) ptep, pte_val(pte), 0, 0, 0);
+		if (pte_val(*ptep) != pte_val(pte)) panic("AP AP AP");
+	} else {
+		*ptep = pte;
+	}
+#else
+	if (ginseng_bReadonlyTables /*&& (ap & 0b10)*/) {
+		int ap = findOA((unsigned long long) ptep, 1 /*bKaddr*/, "[CHECK_AP] ", "PTE", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT_DCI, (unsigned long long) ptep, pte_val(pte), 0, 0, 0);
+			if (pte_val(*ptep) != pte_val(pte)) panic("AP AP AP - set_pte()");
+			else {
+			}
+		} else {
+			*ptep = pte;
+		}
+	} else
+
 	*ptep = pte;
+#endif	
 
 	/*
 	 * Only if the new pte is valid and kernel, otherwise TLB maintenance
@@ -209,9 +275,9 @@ static inline void set_pte_at(struct mm_struct *mm, unsigned long addr,
 {
 	if (pte_present(pte)) {
 		if (pte_sw_dirty(pte) && pte_write(pte))
-			pte_val(pte) &= ~PTE_RDONLY;
+			pte_val(pte) &= ~PTE_RDONLY;			// <--------------- NEED TO CHANGE
 		else
-			pte_val(pte) |= PTE_RDONLY;
+			pte_val(pte) |= PTE_RDONLY;				// <--------------- NEED TO CHANGE
 		if (pte_ng(pte) && pte_exec(pte) && !pte_special(pte))
 			__sync_icache_dcache(pte, addr);
 	}
@@ -381,9 +447,38 @@ extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
 
 static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
 {
+#ifdef USE_EL3_ALWAYS
+	if (system_state == SYSTEM_RUNNING) {
+		dc_invalidate_single(pmdp);	// This makes the SW change the real data in mem not in cache.
+		ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) pmdp, pmd_val(pmd), 0, 0, 0);
+		dsb(ishst);
+		isb();
+	} else {
+		*pmdp = pmd;
+		dsb(ishst);
+		isb();
+	}
+#else
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) pmdp, 1 /*bKaddr*/, "[CHECK_AP] ", "PMD", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			dc_invalidate_single(pmdp);	// This makes the SW change the real data in mem not in cache.
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) pmdp, pmd_val(pmd), 0, 0, 0);
+			dsb(ishst);
+			isb();
+			if (pmd_val(*pmdp) != pmd_val(pmd)) panic("SET_PMD ERROR\n");
+		} else {
+			*pmdp = pmd;
+			dsb(ishst);
+			isb();
+		}
+	} else {
+
 	*pmdp = pmd;
 	dsb(ishst);
 	isb();
+	}
+#endif
 }
 
 static inline void pmd_clear(pmd_t *pmdp)
@@ -432,9 +527,39 @@ static inline phys_addr_t pmd_page_paddr(pmd_t pmd)
 
 static inline void set_pud(pud_t *pudp, pud_t pud)
 {
+#ifdef USE_EL3_ALWAYS
+	if (system_state == SYSTEM_RUNNING) {
+		dc_invalidate_single(pudp);	// This makes the SW change the real data in mem not in cache.
+		ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) pudp, pud_val(pud), 0, 0, 0);
+		dsb(ishst);
+		isb();
+		if (pud_val(*pudp) != pud_val(pud)) panic("SET_PUD ERROR\n");
+	} else {
+		*pudp = pud;
+		dsb(ishst);
+		isb();
+	}
+#else
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) pudp, 1 /*bKaddr*/, "[CHECK_AP] ", "PMD", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			dc_invalidate_single(pudp);	// This makes the SW change the real data in mem not in cache.
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) pudp, pud_val(pud), 0, 0, 0);
+			dsb(ishst);
+			isb();
+			if (pud_val(*pudp) != pud_val(pud)) panic("SET_PUD ERROR\n");
+		} else {
+			*pudp = pud;
+			dsb(ishst);
+			isb();
+		}
+	} else {
+
 	*pudp = pud;
 	dsb(ishst);
 	isb();
+	}
+#endif
 }
 
 static inline void pud_clear(pud_t *pudp)
@@ -485,8 +610,35 @@ static inline phys_addr_t pud_page_paddr(pud_t pud)
 
 static inline void set_pgd(pgd_t *pgdp, pgd_t pgd)
 {
+#ifdef USE_EL3_ALWAYS
+	if (system_state == SYSTEM_RUNNING) {
+		dc_invalidate_single(pgdp);	// This makes the SW change the real data in mem not in cache.
+		ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) pgdp, pgd_val(pgd), 0, 0, 0);
+		dsb(ishst);
+		if (pgd_val(*pgdp) != pgd_val(pgd)) panic("SET_PGD ERROR\n");
+	} else {
+		*pgdp = pgd;
+		dsb(ishst);
+	}
+#else
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) pgdp, 1 /*bKaddr*/, "[CHECK_AP] ", "PMD", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			dc_invalidate_single(pgdp);	// This makes the SW change the real data in mem not in cache.
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) pgdp, pgd_val(pgd), 0, 0, 0);
+			dsb(ishst);
+			if (pgd_val(*pgdp) != pgd_val(pgd)) panic("SET_PGD ERROR\n");
+		} else {
+			*pgdp = pgd;
+			dsb(ishst);
+		}
+	} else {
+
 	*pgdp = pgd;
 	dsb(ishst);
+
+	}
+#endif
 }
 
 static inline void pgd_clear(pgd_t *pgdp)
@@ -620,12 +772,44 @@ static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
 	pteval_t old_pteval;
 	unsigned int tmp;
 
+#ifdef USE_EL3_ALWAYS
+	if (system_state == SYSTEM_RUNNING) {
+		old_pteval = pte_val(*ptep);
+		dc_invalidate_single(ptep);	// This makes the SW change the real data in mem not in cache.
+		ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) ptep, 0, 0, 0, 0);
+		if (pte_val(*ptep) != 0UL) panic("PTEP_GET_AND_CLEAR ERROR\n");
+	} else {
+		asm volatile("//	ptep_get_and_clear\n"
+		"	prfm	pstl1strm, %2\n"
+		"1:	ldxr	%0, %2\n"
+		"	stxr	%w1, xzr, %2\n"
+		"	cbnz	%w1, 1b\n"
+		: "=&r" (old_pteval), "=&r" (tmp), "+Q" (pte_val(*ptep)));
+	}
+#else
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) ptep, 1 /*bKaddr*/, "[CHECK_AP] ", "PTE", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			old_pteval = pte_val(*ptep);
+			dc_invalidate_single(ptep);	// This makes the SW change the real data in mem not in cache.
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) ptep, 0, 0, 0, 0);
+			if (pte_val(*ptep) != 0UL) panic("PTEP_GET_AND_CLEAR ERROR\n");
+		} else {
+			asm volatile("//	ptep_get_and_clear\n"
+			"	prfm	pstl1strm, %2\n"
+			"1:	ldxr	%0, %2\n"
+			"	stxr	%w1, xzr, %2\n"
+			"	cbnz	%w1, 1b\n"
+			: "=&r" (old_pteval), "=&r" (tmp), "+Q" (pte_val(*ptep)));
+		}
+	} else
 	asm volatile("//	ptep_get_and_clear\n"
 	"	prfm	pstl1strm, %2\n"
 	"1:	ldxr	%0, %2\n"
 	"	stxr	%w1, xzr, %2\n"
 	"	cbnz	%w1, 1b\n"
 	: "=&r" (old_pteval), "=&r" (tmp), "+Q" (pte_val(*ptep)));
+#endif
 
 	return __pte(old_pteval);
 }
@@ -648,6 +832,26 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addres
 {
 	pteval_t pteval;
 	unsigned long tmp;
+
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) ptep, 1 /*bKaddr*/, "[CHECK_AP] ", "PTE", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			set_pte_at(mm, address, ptep, pte_wrprotect(*ptep));
+		} else {
+			asm volatile("//	ptep_set_wrprotect\n"
+			"	prfm	pstl1strm, %2\n"
+			"1:	ldxr	%0, %2\n"
+			"	tst	%0, %4			// check for hw dirty (!PTE_RDONLY)\n"
+			"	csel	%1, %3, xzr, eq		// set PTE_DIRTY|PTE_RDONLY if dirty\n"
+			"	orr	%0, %0, %1		// if !dirty, PTE_RDONLY is already set\n"
+			"	and	%0, %0, %5		// clear PTE_WRITE/PTE_DBM\n"
+			"	stxr	%w1, %0, %2\n"
+			"	cbnz	%w1, 1b\n"
+			: "=&r" (pteval), "=&r" (tmp), "+Q" (pte_val(*ptep))
+			: "r" (PTE_DIRTY|PTE_RDONLY), "L" (PTE_RDONLY), "L" (~PTE_WRITE)
+			: "cc");
+		}
+	} else
 
 	asm volatile("//	ptep_set_wrprotect\n"
 	"	prfm	pstl1strm, %2\n"

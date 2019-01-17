@@ -2,6 +2,11 @@
 #include <linux/linkage.h>
 #include <asm/asm-offsets.h>
 #include <asm/assembler.h>
+#include <asm/ginseng.h>
+
+.section .rodata.sleep, "aS"
+str_sleep_fromSleep:
+	.asciz " SLEEP_ASM_from sleep\n"
 
 	.text
 /*
@@ -97,10 +102,17 @@ ENDPROC(__cpu_suspend_enter)
 
 	.pushsection ".idmap.text", "ax"
 ENTRY(cpu_resume)
+	mov x8, #FROM_SLEEP
 	bl	el2_setup		// if in EL2 drop to EL1 cleanly
 	bl	__cpu_setup
 	/* enable the MMU early - so we can access sleep_save_stash by va */
 	bl	__enable_mmu
+
+	mov x6, x30
+	adrp	x4, str_sleep_fromSleep
+	add	x4, x4, #:lo12:str_sleep_fromSleep
+	bl asm_print_str
+	mov x30, x6
 	ldr	x8, =_cpu_resume
 	br	x8
 ENDPROC(cpu_resume)

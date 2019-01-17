@@ -42,6 +42,19 @@
 #include <asm/tlbflush.h>
 
 static const char *fault_name(unsigned int esr);
+#include <linux/ginseng_conf.h>
+#include <linux/entryMagic.h>
+
+extern int bTraceFault;
+extern int ginseng_bReadonlyTables;
+
+#ifdef YMH_USE_SEPARATE_BLOCKS
+#define BLOCKINFO_LOG_MASK_ALL			0b1110
+#define BLOCKINFO_LOG_MASK_BLOCKS		0b0010
+#define BLOCKINFO_LOG_MASK_PTP_PAGES	0b0100
+#define BLOCKINFO_LOG_MASK_NORMAL_PAGES	0b1000
+extern void printBlocksInfo_LIVE(int bSummary);
+#endif /* YMH_USE_SEPARATE_BLOCKS */
 
 #ifdef CONFIG_KPROBES
 static inline int notify_page_fault(struct pt_regs *regs, unsigned int esr)
@@ -140,6 +153,28 @@ int ptep_set_access_flags(struct vm_area_struct *vma,
 	 * Setting the flags must be done atomically to avoid racing with the
 	 * hardware update of the access/dirty state.
 	 */
+	if (ginseng_bReadonlyTables) {
+		int ap = findOA((unsigned long long) ptep, 1 /*bKaddr*/, "[CHECK_AP] ", "PTE", 1 /*bCheckAP*/, NULL /*pIsBlock*/, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		if (ap & 0b10) {
+			pte_t newPte;
+			pte_val(newPte) = (pte_val(*ptep) & ~PTE_RDONLY) | pte_val(entry);
+			ginseng_smc(GINSENG_SMC_CMD_SET_64BIT, (unsigned long long) ptep, pte_val(newPte), 0, 0, 0);
+
+			if (pte_val(*ptep) != pte_val(newPte)) panic("PTEP_SET_ACCESS_FLAGS ERROR\n");
+			// else myprintk("PTEP_SET_ACCESS_FLAGS done by SW\n");
+		} else {
+			asm volatile("//	ptep_set_access_flags\n"
+			"	prfm	pstl1strm, %2\n"
+			"1:	ldxr	%0, %2\n"
+			"	and	%0, %0, %3		// clear PTE_RDONLY\n"
+			"	orr	%0, %0, %4		// set flags\n"
+			"	stxr	%w1, %0, %2\n"
+			"	cbnz	%w1, 1b\n"
+			: "=&r" (old_pteval), "=&r" (tmp), "+Q" (pte_val(*ptep))
+			: "L" (~PTE_RDONLY), "r" (pte_val(entry)));
+		}
+	} else
+
 	asm volatile("//	ptep_set_access_flags\n"
 	"	prfm	pstl1strm, %2\n"
 	"1:	ldxr	%0, %2\n"
@@ -234,7 +269,7 @@ static void do_bad_area(unsigned long addr, unsigned int esr, struct pt_regs *re
 
 static int __do_page_fault(struct mm_struct *mm, unsigned long addr,
 			   unsigned int mm_flags, unsigned long vm_flags,
-			   struct task_struct *tsk)
+			   struct task_struct *tsk, unsigned long long ymh_magic)
 {
 	struct vm_area_struct *vma;
 	int fault;
@@ -260,7 +295,7 @@ good_area:
 		goto out;
 	}
 
-	return handle_mm_fault(vma, addr & PAGE_MASK, mm_flags);
+	return handle_mm_fault(vma, addr & PAGE_MASK, mm_flags, ymh_magic);
 
 check_stack:
 	if (vma->vm_flags & VM_GROWSDOWN && !expand_stack(vma, addr))
@@ -284,7 +319,7 @@ static bool is_el0_instruction_abort(unsigned int esr)
 }
 
 static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
-				   struct pt_regs *regs)
+				   struct pt_regs *regs, unsigned long long ymh_magic)
 {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
@@ -302,11 +337,13 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	 * If we're in an interrupt or have no user context, we must not take
 	 * the fault.
 	 */
-	if (faulthandler_disabled() || !mm)
+	if (faulthandler_disabled() || !mm) {
 		goto no_context;
+	}
 
-	if (user_mode(regs))
+	if (user_mode(regs)){
 		mm_flags |= FAULT_FLAG_USER;
+	}
 
 	if (is_el0_instruction_abort(esr)) {
 		vm_flags = VM_EXEC;
@@ -325,6 +362,7 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 
 		if (!search_exception_tables(regs->pc))
 			die("Accessing user space memory outside uaccess.h routines", regs, esr);
+
 	}
 
 	/*
@@ -333,8 +371,9 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	 * we can bug out early if this is from code which shouldn't.
 	 */
 	if (!down_read_trylock(&mm->mmap_sem)) {
-		if (!user_mode(regs) && !search_exception_tables(regs->pc))
+		if (!user_mode(regs) && !search_exception_tables(regs->pc)) {
 			goto no_context;
+		}
 retry:
 		down_read(&mm->mmap_sem);
 	} else {
@@ -344,20 +383,22 @@ retry:
 		 */
 		might_sleep();
 #ifdef CONFIG_DEBUG_VM
-		if (!user_mode(regs) && !search_exception_tables(regs->pc))
+		if (!user_mode(regs) && !search_exception_tables(regs->pc)) {
 			goto no_context;
+		}
 #endif
 	}
 
-	fault = __do_page_fault(mm, addr, mm_flags, vm_flags, tsk);
+	fault = __do_page_fault(mm, addr, mm_flags, vm_flags, tsk, ymh_magic);
 
 	/*
 	 * If we need to retry but a fatal signal is pending, handle the
 	 * signal first. We do not need to release the mmap_sem because it
 	 * would already be released in __lock_page_or_retry in mm/filemap.c.
 	 */
-	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current)){
 		return 0;
+	}
 
 	/*
 	 * Major/minor page fault accounting is only done on the initial
@@ -365,17 +406,7 @@ retry:
 	 * page will be found in page cache at that point.
 	 */
 
-	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
 	if (mm_flags & FAULT_FLAG_ALLOW_RETRY) {
-		if (fault & VM_FAULT_MAJOR) {
-			tsk->maj_flt++;
-			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MAJ, 1, regs,
-				      addr);
-		} else {
-			tsk->min_flt++;
-			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, regs,
-				      addr);
-		}
 		if (fault & VM_FAULT_RETRY) {
 			/*
 			 * Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk of
@@ -383,6 +414,7 @@ retry:
 			 */
 			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
 			mm_flags |= FAULT_FLAG_TRIED;
+			if (bTraceFault || ginseng_bReadonlyTables) myprintk("GOTO RETRY\n");
 			goto retry;
 		}
 	}
@@ -393,15 +425,17 @@ retry:
 	 * Handle the "normal" case first - VM_FAULT_MAJOR
 	 */
 	if (likely(!(fault & (VM_FAULT_ERROR | VM_FAULT_BADMAP |
-			      VM_FAULT_BADACCESS))))
+			      VM_FAULT_BADACCESS)))) {
 		return 0;
+	}
 
 	/*
 	 * If we are in kernel mode at this point, we have no context to
 	 * handle this fault with.
 	 */
-	if (!user_mode(regs))
+	if (!user_mode(regs)) {
 		goto no_context;
+	}
 
 	if (fault & VM_FAULT_OOM) {
 		/*
@@ -434,6 +468,13 @@ retry:
 	return 0;
 
 no_context:
+	myprintk("PFAULT NO_CONTEXT addr(0x%lX)\n", addr);
+	#ifdef YMH_USE_SEPARATE_BLOCKS
+	if (ginseng_bReadonlyTables) {
+		myprintk("ELR_EL1(0x%16lX)\n", read_sysreg(elr_el1));
+		printBlocksInfo_LIVE(BLOCKINFO_LOG_MASK_BLOCKS | BLOCKINFO_LOG_MASK_PTP_PAGES /*logMask*/);
+	}
+	#endif
 	__do_kernel_fault(mm, addr, esr, regs);
 	return 0;
 }
@@ -457,17 +498,17 @@ no_context:
  */
 static int __kprobes do_translation_fault(unsigned long addr,
 					  unsigned int esr,
-					  struct pt_regs *regs)
+					  struct pt_regs *regs, unsigned long long ymh_magic)
 {
 	if (addr < TASK_SIZE)
-		return do_page_fault(addr, esr, regs);
+		return do_page_fault(addr, esr, regs, ymh_magic);
 
 	do_bad_area(addr, esr, regs);
 	return 0;
 }
 
 static int do_alignment_fault(unsigned long addr, unsigned int esr,
-			      struct pt_regs *regs)
+			      struct pt_regs *regs, unsigned long long ymh_magic)
 {
 	do_bad_area(addr, esr, regs);
 	return 0;
@@ -476,33 +517,33 @@ static int do_alignment_fault(unsigned long addr, unsigned int esr,
 /*
  * This abort handler always returns "fault".
  */
-static int do_bad(unsigned long addr, unsigned int esr, struct pt_regs *regs)
+static int do_bad(unsigned long addr, unsigned int esr, struct pt_regs *regs, unsigned long long ymh_magic)
 {
 	return 1;
 }
 
 static const struct fault_info {
-	int	(*fn)(unsigned long addr, unsigned int esr, struct pt_regs *regs);
+	int	(*fn)(unsigned long addr, unsigned int esr, struct pt_regs *regs, unsigned long long ymh_magic);
 	int	sig;
 	int	code;
 	const char *name;
 } fault_info[] = {
-	{ do_bad,		SIGBUS,  0,		"ttbr address size fault"	},
+	{ do_bad,		SIGBUS,  0,		"ttbr address size fault"	},			// 0
 	{ do_bad,		SIGBUS,  0,		"level 1 address size fault"	},
 	{ do_bad,		SIGBUS,  0,		"level 2 address size fault"	},
 	{ do_bad,		SIGBUS,  0,		"level 3 address size fault"	},
-	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 0 translation fault"	},
-	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 1 translation fault"	},
-	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 2 translation fault"	},
-	{ do_page_fault,	SIGSEGV, SEGV_MAPERR,	"level 3 translation fault"	},
+	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 0 translation fault"	},		// 4
+	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 1 translation fault"	},		// 5
+	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 2 translation fault"	},		// 6
+	{ do_page_fault,	SIGSEGV, SEGV_MAPERR,	"level 3 translation fault"	},			// 7
 	{ do_bad,		SIGBUS,  0,		"unknown 8"			},
 	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 1 access flag fault"	},
 	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 2 access flag fault"	},
-	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 3 access flag fault"	},
+	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 3 access flag fault"	},			// 11
 	{ do_bad,		SIGBUS,  0,		"unknown 12"			},
 	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 1 permission fault"	},
 	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 2 permission fault"	},
-	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 3 permission fault"	},
+	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 3 permission fault"	},			// 15
 	{ do_bad,		SIGBUS,  0,		"synchronous external abort"	},
 	{ do_bad,		SIGBUS,  0,		"unknown 17"			},
 	{ do_bad,		SIGBUS,  0,		"unknown 18"			},
@@ -559,20 +600,93 @@ static const char *fault_name(unsigned int esr)
 	return inf->name;
 }
 
+asmlinkage void __exception ymh_test3(void) {
+	printk("YMH3\n");
+}
+
+#define GICD_BASE		0xFFFF000008000000
+#define GIC_DIST_CTLR	0x000
+
+#define GICC_BASE		0xFFFF000008002000
+#define GICC_HPPIR		0x18
+#define GICC_AHPPIR		0x28
+
+static inline uint32_t mmio_read_32(uintptr_t addr) {
+	uint32_t val;
+
+	val = *(volatile uint32_t*)addr;
+	dsb(sy);
+	isb();
+	return val;
+}
+
+static inline unsigned int gicc_read_hppir(void) {
+	return mmio_read_32(GICC_BASE + GICC_HPPIR);
+}
+
+static inline unsigned int gicc_read_ahppir(void) {
+	return mmio_read_32(GICC_BASE + GICC_AHPPIR);
+}
+
+static inline unsigned int gicd_read_ctlr(void) {
+	return mmio_read_32(GICD_BASE + GIC_DIST_CTLR);
+}
+
 /*
  * Dispatch a data abort to the relevant handler.
  */
+extern bool printFaultReason(unsigned long long ymh_magic, int count);
+unsigned long long v2p_at(unsigned long long vaddr) {
+	unsigned long out;
+	asm volatile (
+		"at s1e0r, %[vaddr]\n"
+		"mrs %[out], par_el1\n"
+		: [out] "=r" (out)
+		: [vaddr] "r" (vaddr)
+		: "memory"
+		);
+
+	return out;
+}
+#ifndef ERR_ADDR
+#define ERR_ADDR	0x0000FFFFB7FCCC00ULL
+#endif
+
 asmlinkage void __exception do_mem_abort(unsigned long addr, unsigned int esr,
-					 struct pt_regs *regs)
+					 struct pt_regs *regs, unsigned long long ymh_magic) //, unsigned long long elr_el1)
 {
 	const struct fault_info *inf = fault_info + (esr & 63);
 	struct siginfo info;
+	int count = atomic_inc_return(&current->abortCounter);
+	unsigned long long far_el1 = read_sysreg(far_el1);
+	unsigned long long elr_el1 = read_sysreg(elr_el1);
+	extern int bGinsengMeasureTracePF;
+	atomic_inc(&current->abortInProcess);
+	if (bTraceFault || ginseng_bReadonlyTables) {
+		if (elr_el1 == 0x0000FFFFB7FDBDE0ULL) {
+			myprintk("CATCH1 !!! (%d)\n", count);
+		}
 
-	if (!inf->fn(addr, esr, regs))
+		if ( (far_el1 & ~0xFFFUL) == 0x0000FFFFB7FCC000UL) {
+			myprintk("CATCH2 !!! (0x%llx) (0x%llx) (%d)\n", v2p_at(far_el1), v2p_at(ERR_ADDR), count);
+			current->catch2_caught++;
+		}
+	}
+
+	if (!inf->fn(addr, esr, regs, ymh_magic)) {
+		if ( (far_el1 & ~0xFFFUL) == 0x0000FFFFB7FCC000UL || current->catch2_caught >= 2) {
+			myprintk("CATCH2-end !!! (0x%llx) (0x%llx) (%d)\n", v2p_at(far_el1), v2p_at(ERR_ADDR), count);
+			myprintk("OA(0x%llX)\n", findOA(ERR_ADDR, 0 /*bKaddr*/, "", "CATCH2", 0 /*bCheckAP*/, NULL /*pIsBlock*/, 0 /*bSilent*/, 1 /*bUseMyprintk*/));
+		}
+
+		if (count == 55 && far_el1 == 0x0000FFFFB7E9EA58ULL) {
+			myprintk("READY TO DEBUG!!!\n");
+		}
+
 		return;
+	}
 
-	pr_alert("Unhandled fault: %s (0x%08x) at 0x%016lx\n",
-		 inf->name, esr, addr);
+	pr_alert("Unhandled fault: %s ESR(0x%08x) at ADDR(0x%016lx)\n", inf->name, esr, addr);
 
 	info.si_signo = inf->sig;
 	info.si_errno = 0;
@@ -605,7 +719,7 @@ asmlinkage void __exception do_sp_pc_abort(unsigned long addr,
 }
 
 int __init early_brk64(unsigned long addr, unsigned int esr,
-		       struct pt_regs *regs);
+		       struct pt_regs *regs, unsigned long long ymh_magic);
 
 /*
  * __refdata because early_brk64 is __init, but the reference to it is
@@ -624,7 +738,7 @@ static struct fault_info __refdata debug_fault_info[] = {
 };
 
 void __init hook_debug_fault_code(int nr,
-				  int (*fn)(unsigned long, unsigned int, struct pt_regs *),
+				  int (*fn)(unsigned long, unsigned int, struct pt_regs *, unsigned long long),
 				  int sig, int code, const char *name)
 {
 	BUG_ON(nr < 0 || nr >= ARRAY_SIZE(debug_fault_info));
@@ -650,7 +764,7 @@ asmlinkage int __exception do_debug_exception(unsigned long addr,
 	if (interrupts_enabled(regs))
 		trace_hardirqs_off();
 
-	if (!inf->fn(addr, esr, regs)) {
+	if (!inf->fn(addr, esr, regs, 0)) {
 		rv = 1;
 	} else {
 		pr_alert("Unhandled debug exception: %s (0x%08x) at 0x%016lx\n",

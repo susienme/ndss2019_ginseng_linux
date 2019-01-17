@@ -1955,6 +1955,11 @@ struct task_struct {
 	/* A live task holds one reference. */
 	atomic_t stack_refcount;
 #endif
+
+	atomic_t abortCounter;// = ATOMIC_INIT(0);
+	atomic_t abortInProcess;// = ATOMIC_INIT(0);
+	int catch2_caught;
+
 /* CPU-specific state of this task */
 	struct thread_struct thread;
 /*

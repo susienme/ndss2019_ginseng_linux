@@ -41,6 +41,7 @@
 #include <asm/sysreg.h>
 #include <asm/thread_info.h>
 #include <asm/virt.h>
+#include <asm/ginseng.h>
 
 #define __PHYS_OFFSET	(KERNEL_START - TEXT_OFFSET)
 
@@ -51,6 +52,15 @@
 #elif TEXT_OFFSET > 0x1fffff
 #error TEXT_OFFSET must be less than 2MB
 #endif
+
+.global asm_print_str
+.global asm_print_hex
+
+.section .rodata.head, "aS"
+str_fromSleep:
+	.asciz " HEAD_FROM_SLEEP\n"
+str_fromColdboot:
+	.asciz " HEAD_FROM_COLDBOOT\n"
 
 /*
  * Kernel startup entry point.
@@ -220,11 +230,13 @@ efi_header_end:
 	 */
 ENTRY(stext)
 	bl	preserve_boot_args
+	mov x8, #FROM_COLDBOOT
 	bl	el2_setup			// Drop to EL1, w0=cpu_boot_mode
 	adrp	x23, __PHYS_OFFSET
 	and	x23, x23, MIN_KIMG_ALIGN - 1	// KASLR offset, defaults to 0
 	bl	set_cpu_boot_mode_flag
 	bl	__create_page_tables
+
 	/*
 	 * The following calls CPU setup code, see arch/arm64/mm/proc.S for
 	 * details.
@@ -499,6 +511,8 @@ CPU_BE(	orr	x0, x0, #(3 << 24)	)	// Set the EE and E0E bits for EL1
 CPU_LE(	bic	x0, x0, #(3 << 24)	)	// Clear the EE and E0E bits for EL1
 	msr	sctlr_el1, x0
 	mov	w0, #BOOT_CPU_MODE_EL1		// This cpu booted in EL1
+88:
+	b 88b // <--- NO NO NO
 	isb
 	ret
 
@@ -512,7 +526,7 @@ CPU_LE(	bic	x0, x0, #(3 << 24)	)	// Clear the EE and E0E bits for EL1
 	mrs	x2, id_aa64mmfr1_el1
 	ubfx	x2, x2, #8, #4
 #else
-	mov	x2, xzr
+	mov	x2, xzr   <-------------- NO NO
 #endif
 
 	/* Hyp configuration. */
@@ -520,9 +534,18 @@ CPU_LE(	bic	x0, x0, #(3 << 24)	)	// Clear the EE and E0E bits for EL1
 	cbz	x2, set_hcr
 	orr	x0, x0, #HCR_TGE		// Enable Host Extensions
 	orr	x0, x0, #HCR_E2H
+88:
+	b 88b 	// <--- NO NO NO: means VHE is NOT supported
+
 set_hcr:
-	msr	hcr_el2, x0
+	msr	hcr_el2, x0 // YMH: x0 = HCR_RW (only)  (NO TGE/ E2H)
 	isb
+
+	mov x7, x2
+	mov x6, x30
+	bl initConsole 	// clobber: x0, x1, x2  <-- has to be reset everytime a core resumes
+	mov x30, x6
+	mov x2, x7
 
 	/* Generic timers. */
 	mrs	x0, cnthctl_el2
@@ -530,7 +553,7 @@ set_hcr:
 	msr	cnthctl_el2, x0
 	msr	cntvoff_el2, xzr		// Clear virtual offset
 
-#ifdef CONFIG_ARM_GIC_V3
+#ifdef CONFIG_ARM_GIC_V3 		// YMH: <-------- defined
 	/* GICv3 system register access */
 	mrs	x0, id_aa64pfr0_el1
 	ubfx	x0, x0, #24, #4
@@ -570,6 +593,9 @@ CPU_BE(	movk	x0, #0x33d0, lsl #16	)	// Set EE and E0E on BE systems
 CPU_LE(	movk	x0, #0x30d0, lsl #16	)	// Clear EE and E0E on LE systems
 	msr	sctlr_el1, x0
 
+	mov x0, 0b1101
+	msr PMUSERENR_EL0, x0
+
 	/* Coprocessor traps. */
 	mov	x0, #0x33ff
 	msr	cptr_el2, x0			// Disable copro. traps to EL2
@@ -594,17 +620,42 @@ CPU_LE(	movk	x0, #0x30d0, lsl #16	)	// Clear EE and E0E on LE systems
 	msr	vttbr_el2, xzr
 
 	cbz	x2, install_el2_stub
+	///////////////////////////////// <--------------- below will not be reached. Function el2_setup will e-return in install_el2_stub
 
 	mov	w0, #BOOT_CPU_MODE_EL2		// This CPU booted in EL2
 	isb
+
+88:
+	mov x6, x30
+	adrp	x4, str_fromColdboot
+	add	x4, x4, #:lo12:str_fromColdboot
+	bl asm_print_str
+	b 88b
 	ret
 
-install_el2_stub:
+install_el2_stub: // <------- called every from sleep
 	/* Hypervisor stub */
 	adrp	x0, __hyp_stub_vectors
 	add	x0, x0, #:lo12:__hyp_stub_vectors
 	msr	vbar_el2, x0
+	cmp x8, #FROM_SLEEP
+	b.ne 3f
 
+	mov x6, x30
+	adrp	x4, str_fromSleep
+	add	x4, x4, #:lo12:str_fromSleep
+	bl asm_print_str
+	mov x30, x6
+	b 4f
+
+3:  // cold boot
+	mov x6, x30
+	adrp	x4, str_fromColdboot
+	add	x4, x4, #:lo12:str_fromColdboot
+	bl asm_print_str
+	mov x30, x6
+	
+4:
 	/* spsr */
 	mov	x0, #(PSR_F_BIT | PSR_I_BIT | PSR_A_BIT | PSR_D_BIT |\
 		      PSR_MODE_EL1h)
@@ -835,3 +886,111 @@ __primary_switch:
 	adrp	x0, __PHYS_OFFSET
 	br	x8
 ENDPROC(__primary_switch)
+
+#define CRASH_CONSOLE_BASE		0xF7113000
+#define CRASH_CONSOLE_BASE_VA		0xFFFF8000F7113000
+#define PL011_UART_CLK_IN_HZ		19200000
+#define PL011_BAUDRATE			115200
+#define ASCII_OFFSET_NUM        0x30
+#include "pl011.h"
+
+initConsole:
+	ldr	x0, =CRASH_CONSOLE_BASE
+	ldr	x1, =PL011_UART_CLK_IN_HZ
+	ldr	x2, =PL011_BAUDRATE
+	mov x4, xzr
+	mov x5, xzr
+
+	// Program the baudrate 
+	// Divisor =  (Uart clock * 4) / baudrate 
+	lsl	w1, w1, #2
+	udiv	w2, w1, w2
+	// IBRD = Divisor >> 6 
+	lsr	w1, w2, #6
+	
+	// Write the IBRD 
+	str	w1, [x0, #UARTIBRD]
+	// FBRD = Divisor & 0x3F 
+	and	w1, w2, #0x3f
+	// Write the FBRD 
+	str	w1, [x0, #UARTFBRD]
+	mov	w1, #PL011_LINE_CONTROL
+	str	w1, [x0, #UARTLCR_H]
+	// Clear any pending errors 
+	str	wzr, [x0, #UARTECR]
+	// Enable tx, rx, and uart overall 
+	mov	w1, #(PL011_UARTCR_RXE | PL011_UARTCR_TXE | PL011_UARTCR_UARTEN)
+	str	w1, [x0, #UARTCR]
+	mov	w0, #1
+	ret
+	ENDPROC(initConsole)
+
+// copied from ATZ
+/*
+ * This function prints a string from address in x4.
+ * In: x4 = pointer to string.
+ * Clobber: x30, x0, x1, x2, x3
+ */
+asm_print_str:
+	mov	x3, x30
+1:
+	ldrb	w0, [x4], #0x1
+	cbz	x0, 2f
+	bl	plat_crash_console_putc
+	b	1b
+2:
+	ret	x3
+	ENDPROC(asm_print_str)
+
+/*
+ * This function prints a hexadecimal number in x4.
+ * In: x4 = the hexadecimal to print.
+ * Clobber: x30, x0, x5, x1, x2, x3
+ */
+asm_print_hex:
+	mov	x3, x30
+	mov	x5, #64  /* No of bits to convert to ascii */
+1:
+	sub	x5, x5, #4
+	lsrv	x0, x4, x5
+	and	x0, x0, #0xf
+	cmp	x0, #0xA
+	b.lo	2f
+	/* Add by 0x27 in addition to ASCII_OFFSET_NUM
+	 * to get ascii for characters 'a - f'.
+	 */
+	add	x0, x0, #0x27
+2:
+	add	x0, x0, #ASCII_OFFSET_NUM
+	bl	plat_crash_console_putc
+	cbnz	x5, 1b
+	ret	x3
+	ENDPROC(asm_print_hex)
+
+plat_crash_console_putc:
+	ldr	x1, =CRASH_CONSOLE_BASE
+	b	console_core_putc
+	ENDPROC(plat_crash_console_putc)
+
+console_core_putc:
+	// Check the input parameter
+	cbz	x1, putc_error
+	// Prepend '\r' to '\n'
+	cmp	w0, #0xA
+	b.ne	2f
+1:
+	// Check if the transmit FIFO is full
+	ldr	w2, [x1, #UARTFR]
+	tbnz	w2, #PL011_UARTFR_TXFF_BIT, 1b
+	mov	w2, #0xD
+	str	w2, [x1, #UARTDR]
+2:
+	// Check if the transmit FIFO is full
+	ldr	w2, [x1, #UARTFR]
+	tbnz	w2, #PL011_UARTFR_TXFF_BIT, 2b
+	str	w0, [x1, #UARTDR]
+	ret
+putc_error:
+	mov	w0, #-1
+	ret
+	ENDPROC(console_core_putc)

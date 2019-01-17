@@ -502,6 +502,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	atomic_set(&tsk->stack_refcount, 1);
 #endif
 
+	atomic_set(&tsk->abortCounter, 0);
+	atomic_set(&tsk->abortInProcess, 0);
+	tsk->catch2_caught = 0;
+
 	if (err)
 		goto free_stack;
 
@@ -1970,6 +1974,7 @@ long _do_fork(unsigned long clone_flags,
 	} else {
 		nr = PTR_ERR(p);
 	}
+
 	return nr;
 }
 

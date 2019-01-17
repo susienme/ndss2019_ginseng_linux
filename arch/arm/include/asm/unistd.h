@@ -20,7 +20,6 @@
  * account for the padding in the syscall table
  */
 #define __NR_syscalls  (400)
-
 #define __ARCH_WANT_STAT64
 #define __ARCH_WANT_SYS_GETHOSTNAME
 #define __ARCH_WANT_SYS_PAUSE

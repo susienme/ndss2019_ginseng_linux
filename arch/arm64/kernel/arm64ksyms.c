@@ -74,4 +74,5 @@ NOKPROBE_SYMBOL(_mcount);
 
 	/* arm-smccc */
 EXPORT_SYMBOL(arm_smccc_smc);
+EXPORT_SYMBOL(ymh_arm_smccc_smc);
 EXPORT_SYMBOL(arm_smccc_hvc);

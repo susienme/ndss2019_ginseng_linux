@@ -585,7 +585,7 @@ NOKPROBE_SYMBOL(toggle_bp_registers);
  * Debug exception handlers.
  */
 static int breakpoint_handler(unsigned long unused, unsigned int esr,
-			      struct pt_regs *regs)
+			      struct pt_regs *regs, unsigned long long unused2)
 {
 	int i, step = 0, *kernel_step;
 	u32 ctrl_reg;
@@ -662,7 +662,7 @@ unlock:
 NOKPROBE_SYMBOL(breakpoint_handler);
 
 static int watchpoint_handler(unsigned long addr, unsigned int esr,
-			      struct pt_regs *regs)
+			      struct pt_regs *regs, unsigned long long unused)
 {
 	int i, step = 0, *kernel_step, access;
 	u32 ctrl_reg;

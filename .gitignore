@@ -114,3 +114,13 @@ all.config
 
 # Kdevelop4
 *.kdev4
+build.sh
+touched_files
+installedModules
+
+# mine
+arch/arm64/boot/dts/hisilicon_fromAndroid/
+arch/arm64/boot/dts/hisilicon_fromV4.12/
+arch/arm64/configs/defconfig.rej
+hi6220-hikey.dts
+

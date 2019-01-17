@@ -1,0 +1,6 @@
+#ifndef __YMH_GINSENG_CONF_H
+#define __YMH_GINSENG_CONF_H
+
+#define YMH_USE_SEPARATE_BLOCKS
+
+#endif

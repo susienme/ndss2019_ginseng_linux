@@ -3310,4 +3310,55 @@ void show_regs_print_info(const char *log_lvl)
 	       log_lvl, current, task_stack_page(current));
 }
 
+enum {	LOGMODE_RESET = 0,
+		LOGMODE_MEM = 1,
+		LOGMODE_PRINTK = 9
+};
+static int log_mode = LOGMODE_PRINTK;
+
+#define MYPRINTK_EMPTY
+int myprintk(const char *fmt, ...) {
+#if 1	// silence...
+	return 0;
+#else
+	#if defined(MYPRINTK_WITH_TIME) || defined(MYPRINTK_SIMPLEST)
+	struct timespec time_current_procMyprintk;
+	#endif
+	va_list args;
+	int len;
+	char logBuf[256];
+	int cpuId;
+
+	if(!log_mode) return 0;
+
+	preempt_disable();
+	cpuId = smp_processor_id();
+	preempt_enable();
+
+	#if defined(MYPRINTK_WITH_TIME) || defined(MYPRINTK_SIMPLEST)
+	ktime_get_ts(&time_current_procMyprintk);
+	#endif
+	va_start(args, fmt);
+
+	if (log_mode == LOGMODE_PRINTK) {
+		#if defined(MYPRINTK_SIMPLEST)
+		len = sprintf(logBuf, "##(pid:%5d)## ", current->pid);
+		#elif defined(MYPRINTK_EMPTY)
+		len = 0;
+		#elif defined(MYPRINTK_WITH_TIME)
+		len = sprintf(logBuf, "[CPU-%d]#|%5d.%09d|##(pid:%5d tgid:%5d)####### ", cpuId, (int) time_current_procMyprintk.tv_sec, (int) time_current_procMyprintk.tv_nsec, current->pid, current->tgid);
+		#else
+		len = sprintf(logBuf, "[CPU-%d] (pid:%5d tgid:%5d)## ", cpuId, current->pid, current->tgid);
+		#endif
+		vsprintf(logBuf + len, fmt, args);
+		len = printk("%s", logBuf);
+		va_end(args);
+		return len;
+	}
+
+	printk("YMH########## NOT SUPPORTED\n");
+	return len;
+#endif
+}
+EXPORT_SYMBOL(myprintk);
 #endif

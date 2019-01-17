@@ -31,6 +31,10 @@
 #include <asm/memory.h>
 #include <asm/thread_info.h>
 #include <asm/unistd.h>
+#include <linux/entryMagic.h>
+	.globl ymh_sysentry_addr
+	.globl ymh_sysentry_afterKernelEntry_addr
+	.globl ymh_syscmp
 
 /*
  * Context tracking subsystem.  Used to instrument transitions
@@ -89,6 +93,24 @@
 	stp	x28, x29, [sp, #16 * 14]
 
 	.if	\el == 0
+	mrs x0, daif
+	ldr x1, =ymh_daif_sync_from_el0
+	str x0, [x1]
+
+	mrs x0, nzcv
+	ldr x1, =ymh_nzcv_sync_from_el0
+	str x0, [x1]
+
+	mov x1, 0x2021000000000000
+	cmp x0, x1
+	b.ne 2f
+
+1:
+	b 1b
+
+2:
+	ldp	x0, x1, [sp, #16 * 0]
+
 	mrs	x21, sp_el0
 	mov	tsk, sp
 	and	tsk, tsk, #~(THREAD_SIZE - 1)	// Ensure MDSCR_EL1.SS is clear,
@@ -99,12 +121,12 @@
 	.else
 	add	x21, sp, #S_FRAME_SIZE
 	get_thread_info tsk
-	/* Save the task's original addr_limit and set USER_DS (TASK_SIZE_64) */
+	/* Save the task''s original addr_limit and set USER_DS (TASK_SIZE_64) */
 	ldr	x20, [tsk, #TI_ADDR_LIMIT]
 	str	x20, [sp, #S_ORIG_ADDR_LIMIT]
 	mov	x20, #TASK_SIZE_64
 	str	x20, [tsk, #TI_ADDR_LIMIT]
-	/* No need to reset PSTATE.UAO, hardware's already set it to 0 for us */
+	/* No need to reset PSTATE.UAO, hardware''s already set it to 0 for us */
 	.endif /* \el == 0 */
 	mrs	x22, elr_el1
 	mrs	x23, spsr_el1
@@ -133,11 +155,11 @@
 	 * x22 - aborted PC
 	 * x23 - aborted PSTATE
 	*/
-	.endm
+	.endm   // <--------- kernel_entry
 
 	.macro	kernel_exit, el
 	.if	\el != 0
-	/* Restore the task's original addr_limit. */
+	/* Restore the task''s original addr_limit. */
 	ldr	x20, [sp, #S_ORIG_ADDR_LIMIT]
 	str	x20, [tsk, #TI_ADDR_LIMIT]
 
@@ -254,6 +276,39 @@ tsk	.req	x28		// current thread_info
  */
 	.pushsection ".entry.text", "ax"
 
+// 0: no exception routing (legacy)
+// 1: exception routing    (ginseng)
+#if 0
+	.align	11
+ENTRY(vectors)
+	smcventry	el1_sync_invalid		// Synchronous EL1t
+	smcventry	el1_irq_invalid			// IRQ EL1t
+	smcventry	el1_fiq_invalid			// FIQ EL1t
+	smcventry	el1_error_invalid		// Error EL1t
+
+	smcventry	el1_sync			// Synchronous EL1h
+	smcventry	el1_irq				// IRQ EL1h
+	smcventry	el1_fiq_invalid			// FIQ EL1h
+	smcventry	el1_error_invalid		// Error EL1h
+
+	smcventry	el0_sync			// Synchronous 64-bit EL0
+	smcventry	el0_irq				// IRQ 64-bit EL0
+	smcventry	el0_fiq_invalid			// FIQ 64-bit EL0
+	smcventry	el0_error_invalid		// Error 64-bit EL0
+
+#ifdef CONFIG_COMPAT
+	smcventry	el0_sync_compat			// Synchronous 32-bit EL0
+	smcventry	el0_irq_compat			// IRQ 32-bit EL0
+	smcventry	el0_fiq_invalid_compat		// FIQ 32-bit EL0
+	smcventry	el0_error_invalid_compat	// Error 32-bit EL0
+#else
+	smcventry	el0_sync_invalid		// Synchronous 32-bit EL0
+	smcventry	el0_irq_invalid			// IRQ 32-bit EL0
+	smcventry	el0_fiq_invalid			// FIQ 32-bit EL0
+	smcventry	el0_error_invalid		// Error 32-bit EL0
+#endif
+END(vectors)
+#else
 	.align	11
 ENTRY(vectors)
 	ventry	el1_sync_invalid		// Synchronous EL1t
@@ -283,7 +338,7 @@ ENTRY(vectors)
 	ventry	el0_error_invalid		// Error 32-bit EL0
 #endif
 END(vectors)
-
+#endif
 /*
  * Invalid mode handlers
  */
@@ -365,10 +420,19 @@ el1_ia:
 	/*
 	 * Fall through to the Data abort case
 	 */
+	 #if 1
+	 ldr x3, =YMH_MAGIC_EL1_IA
+	 b 1f
+	 #endif
+
 el1_da:
 	/*
 	 * Data abort handling
 	 */
+	#if 1
+	ldr x3, =YMH_MAGIC_EL1_DA
+1:
+	#endif
 	mrs	x0, far_el1
 	enable_dbg
 	// re-enable interrupts if they were enabled in the aborted context
@@ -419,7 +483,7 @@ ENDPROC(el1_sync)
 	.align	6
 el1_irq:
 	kernel_entry 1
-	enable_dbg
+
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_off
 #endif
@@ -454,7 +518,28 @@ el1_preempt:
  */
 	.align	6
 el0_sync:
+ymh_syscmp:	// 0xFFFF000008083040
+
+	cmp w8, #__NR_hong
+	b.ne 2f
+
+2:
 	kernel_entry 0
+	
+ymh_syscmp_afterKernelEntry:	// 0xFFFF0000080830CC
+	cmp w8, #__NR_hong
+	b.ne 2f
+
+2:
+
+	ldr x25, =ymh_sysentry_addr
+	adr x24, ymh_syscmp
+	str x24, [x25]
+
+	ldr x25, =ymh_sysentry_afterKernelEntry_addr
+	adr x24, ymh_syscmp_afterKernelEntry
+	str x24, [x25]
+
 	mrs	x25, esr_el1			// read the syndrome register
 	lsr	x24, x25, #ESR_ELx_EC_SHIFT	// exception class
 	cmp	x24, #ESR_ELx_EC_SVC64		// SVC in 64-bit state
@@ -538,6 +623,17 @@ el0_da:
 	bic	x0, x26, #(0xff << 56)
 	mov	x1, x25
 	mov	x2, sp
+	lsr x24, x1, #ESR_ELx_EC_SHIFT
+	cmp x24, #ESR_ELx_EC_DABT_LOW
+	b.ne ymh_pass
+
+	and x24, x1, #0xffff
+	cmp x24, #0x210
+	b.ne ymh_pass
+	bl ymh_test3
+
+ymh_pass:
+	ldr x3, =YMH_MAGIC_EL0_DA
 	bl	do_mem_abort
 	b	ret_to_user
 el0_ia:
@@ -551,6 +647,7 @@ el0_ia:
 	mov	x0, x26
 	mov	x1, x25
 	mov	x2, sp
+	ldr x3, =YMH_MAGIC_EL0_IA
 	bl	do_mem_abort
 	b	ret_to_user
 el0_fpsimd_acc:
@@ -634,10 +731,17 @@ el0_irq:
 el0_irq_naked:
 	enable_dbg
 #ifdef CONFIG_TRACE_IRQFLAGS
-	bl	trace_hardirqs_off
+	bl	trace_hardirqs_off ############## NOT USED
 #endif
 
 	ct_user_exit
+	ldr x0, =ymh_el10_irq
+	adr x1, el0_irq
+	str x1, [x0]
+
+	ldr x0, =ymh_el10_irq_spsr
+	mrs x1, spsr_el1
+	str x1, [x0]
 	irq_handler
 
 #ifdef CONFIG_TRACE_IRQFLAGS

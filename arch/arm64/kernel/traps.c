@@ -602,11 +602,20 @@ asmlinkage void bad_mode(struct pt_regs *regs, int reason, unsigned int esr)
 {
 	siginfo_t info;
 	void __user *pc = (void __user *)instruction_pointer(regs);
+	unsigned long spsr = 0xff;
+	asm volatile (
+		"mrs %[out], spsr_el1\n"
+		: [out] "=r" (spsr)
+		:: "memory"
+		);
 	console_verbose();
 
 	pr_crit("Bad mode in %s handler detected on CPU%d, code 0x%08x -- %s\n",
 		handler[reason], smp_processor_id(), esr,
 		esr_get_class_string(esr));
+
+	pr_crit("SPSR_EL1: 0x%lx\n", spsr);
+
 	__show_regs(regs);
 
 	info.si_signo = SIGILL;

@@ -27,22 +27,63 @@
 #include <asm/ptrace.h>
 #include <asm/virt.h>
 
+#define INST_MSR_TTBR0_EL1_X0		0xD5182000
+#define EL1_IRQ_HANDLER 			0xFFFF000008083480
+#define HONG_SPSR 		0x60000145
+
+.section .rodata.hyp, "aS"
+str_hyp_newl:
+	.asciz "\n"
+str_hyp_invalid_el2_sync_invalid:
+	.asciz " el2_sync_invalid\n"
+str_hyp_invalid_el2_irq_invalid:
+	.asciz " el2_irq_invalid\n"
+str_hyp_invalid_el2_fiq_invalid:
+	.asciz " el2_fiq_invalid\n"
+str_hyp_invalid_el2_error_invalid_h:
+	.asciz " el2_error_invalid_h\n"
+str_hyp_invalid_el1_sync_invalid:
+	.asciz " el1_sync_invalid\n"
+str_hyp_invalid_el1_irq_invalid:
+	.asciz " el1_irq_invalid\n"
+str_hyp_invalid_el1_fiq_invalid:
+	.asciz " el1_fiq_invalid\n"
+str_hyp_invalid_el1_error_invalid:
+	.asciz " el1_error_invalid\n"
+str_hyp_invalid_el2_sync_invalid_t:
+	.asciz " el2_sync_invalid_t\n"
+str_hyp_invalid_el2_sync_invalid_h:
+	.asciz " el2_sync_invalid_h\n"
+str_hyp_invalid_el2_error_invalid_t:
+	.asciz " el2_error_invalid_t\n"
+
+.globl ymh_magic
 	.text
 	.align 11
 
+my_el1_irq:
+	adrp	x4, str_hyp_invalid_el1_irq_invalid
+	add	x4, x4, #:lo12:str_hyp_invalid_el1_irq_invalid
+	bl asm_print_str
+2:
+	b   2b
+
+	smc #7
+	eret
+
 ENTRY(__hyp_stub_vectors)
-	ventry	el2_sync_invalid		// Synchronous EL2t
+	ventry	el2_sync_invalid_t		// Synchronous EL2t
 	ventry	el2_irq_invalid			// IRQ EL2t
 	ventry	el2_fiq_invalid			// FIQ EL2t
-	ventry	el2_error_invalid		// Error EL2t
+	ventry	el2_error_invalid_t		// Error EL2t
 
-	ventry	el2_sync_invalid		// Synchronous EL2h
+	ventry	el2_sync_invalid_h		// Synchronous EL2h
 	ventry	el2_irq_invalid			// IRQ EL2h
 	ventry	el2_fiq_invalid			// FIQ EL2h
-	ventry	el2_error_invalid		// Error EL2h
+	ventry	el2_error_invalid_h		// Error EL2h
 
 	ventry	el1_sync			// Synchronous 64-bit EL1
-	ventry	el1_irq_invalid			// IRQ 64-bit EL1
+	ventry  my_el1_irq // ventry	el1_irq_invalid			// IRQ 64-bit EL1
 	ventry	el1_fiq_invalid			// FIQ 64-bit EL1
 	ventry	el1_error_invalid		// Error 64-bit EL1
 
@@ -54,7 +95,51 @@ ENDPROC(__hyp_stub_vectors)
 
 	.align 11
 
+
 el1_sync:
+	smc #8
+	eret
+
+5:
+	b 5b	
+
+	mrs x4, elr_el2 		// ELR_EL2: 	0xffff00000809bab8
+	ubfx x4, x4, #0, #24 	// VA -> PA
+	ldr w4, [x4]
+
+	ldr w5, =INST_MSR_TTBR0_EL1_X0
+	cmp w4, w5
+	//b.ne 5f
+	b.ne 77f
+
+	msr ttbr0_el1, x0
+	// Don't need to trap read (MRS) instructions
+
+	mrs x4, elr_el2
+	add x4, x4, #4
+	msr elr_el2, x4
+
+	eret
+
+
+77:
+	bl asm_print_hex // unhandled inst
+
+	mrs x4, esr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, spsr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+88:
+	b 88b
+
 	mrs	x30, esr_el2
 	lsr	x30, x30, #ESR_ELx_EC_SHIFT
 
@@ -82,23 +167,140 @@ el1_sync:
 	/* Someone called kvm_call_hyp() against the hyp-stub... */
 3:	mov	x0, #ARM_EXCEPTION_HYP_GONE
 
-9:	eret
+9:	
+	eret
 ENDPROC(el1_sync)
 
 .macro invalid_vector	label
 \label:
+	adrp	x4, str_hyp_invalid_\label
+	add	x4, x4, #:lo12:str_hyp_invalid_\label
+	bl asm_print_str
+
+	mrs x4, elr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, spsr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, far_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, esr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	smc #7
+
+	eret // <-- unreachable...
 	b \label
 ENDPROC(\label)
 .endm
 
-	invalid_vector	el2_sync_invalid
 	invalid_vector	el2_irq_invalid
 	invalid_vector	el2_fiq_invalid
-	invalid_vector	el2_error_invalid
 	invalid_vector	el1_sync_invalid
 	invalid_vector	el1_irq_invalid
 	invalid_vector	el1_fiq_invalid
 	invalid_vector	el1_error_invalid
+
+el2_sync_invalid_t:
+	adrp	x4, str_hyp_invalid_el2_sync_invalid_t
+	add	x4, x4, #:lo12:str_hyp_invalid_el2_sync_invalid_t
+	bl asm_print_str
+	b el2_sync_invalid_t
+
+el2_error_invalid_t:
+	adrp	x4, str_hyp_invalid_el2_error_invalid_t
+	add	x4, x4, #:lo12:str_hyp_invalid_el2_error_invalid_t
+	bl asm_print_str
+
+	mrs x4, esr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, spsr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, far_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+2:
+	b 2b
+
+
+el2_error_invalid_h:
+	smc #11
+	eret
+
+	mrs x0, mpidr_el1
+	and x1, x0, #0xFF
+	and x0, x0, #0xFF00
+	add x4, x1, x0, LSR #6		// CPU ID
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	adrp	x4, str_hyp_invalid_el2_error_invalid_h
+	add	x4, x4, #:lo12:str_hyp_invalid_el2_error_invalid_h
+	bl asm_print_str
+
+	mrs x4, esr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, spsr_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+	mrs x4, far_el2
+	bl asm_print_hex
+	adrp	x4, str_hyp_newl
+	add	x4, x4, #:lo12:str_hyp_newl
+	bl asm_print_str
+
+2:
+	b 2b
+
+
+el2_sync_invalid_h:
+	adrp	x4, str_hyp_invalid_el2_sync_invalid_h
+	add	x4, x4, #:lo12:str_hyp_invalid_el2_sync_invalid_h
+	bl asm_print_str
+
+	smc #9
+	eret
+	
+
+	mrs x4, esr_el2
+	bl asm_print_hex
+79:
+	b 79b	
+	b el2_sync_invalid_h
 
 /*
  * __hyp_set_vectors: Call this after boot to set the initial hypervisor

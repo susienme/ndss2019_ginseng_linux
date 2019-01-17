@@ -74,6 +74,7 @@
 #include <asm/pgtable.h>
 
 #include "internal.h"
+#include <linux/entryMagic.h>
 
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
@@ -87,6 +88,10 @@ struct page *mem_map;
 EXPORT_SYMBOL(max_mapnr);
 EXPORT_SYMBOL(mem_map);
 #endif
+
+int bTraceFault = 0;
+extern int ginseng_bReadonlyTables;
+unsigned long long findContainingPageBlock(unsigned long long pEntry, char *strType);
 
 /*
  * A number of key systems in x86 including ioremap() rely on the assumption
@@ -107,7 +112,7 @@ EXPORT_SYMBOL(high_memory);
  */
 int randomize_va_space __read_mostly =
 #ifdef CONFIG_COMPAT_BRK
-					1;
+					0;
 #else
 					2;
 #endif
@@ -1170,6 +1175,7 @@ again:
 			page_remove_rmap(page, false);
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
+
 			if (unlikely(__tlb_remove_page(tlb, page))) {
 				force_flush = 1;
 				pending_page = page;
@@ -3568,7 +3574,7 @@ unlock:
  * return value.  See filemap_fault() and __lock_page_or_retry().
  */
 static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
-		unsigned int flags)
+		unsigned int flags, unsigned long long ymh_magic)
 {
 	struct fault_env fe = {
 		.vma = vma,
@@ -3614,6 +3620,58 @@ static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	return handle_pte_fault(&fe);
 }
 
+// returns true when READ
+bool printFaultReason(unsigned long long ymh_magic, int count) {
+	unsigned long long esr_el1 = read_sysreg(esr_el1);
+	bool bWrite = (esr_el1 & 0b1000000);
+	char buf[64];// = "UNKNWON - READ!!!\n";	// the longest string
+
+	bool rtn = false;
+	switch(ymh_magic) {
+	case YMH_MAGIC_EL0_DA:
+		if (bWrite) sprintf(buf, "EL0_DA (%d)\n", count);
+		else {
+			sprintf(buf, "EL0_DA - READ!!! (%d)\n", count);
+			rtn = true;
+		}
+		myprintk(buf);
+		break;
+	case YMH_MAGIC_EL0_IA:
+		if (bWrite) sprintf(buf, "EL0_IA (%d)\n", count);
+		else {
+			sprintf(buf, "EL0_IA - READ!!! (%d)\n", count);
+			rtn = true;
+		}
+		myprintk(buf);
+		break;
+	case YMH_MAGIC_EL1_IA:
+		if (bWrite) sprintf(buf, "EL1_IA (%d)\n", count);
+		else {
+			sprintf(buf, "EL1_IA - READ!!! (%d)\n", count);
+			rtn = true;
+		}
+		myprintk(buf);
+		break;
+	case YMH_MAGIC_EL1_DA:
+		if (bWrite) sprintf(buf, "EL1_DA (%d)\n", count);
+		else {
+			sprintf(buf, "EL1_DA - READ!!! (%d)\n", count);
+			rtn = true;
+		}
+		myprintk(buf);
+		break;
+	default:
+		if (bWrite) sprintf(buf, "UNKNWON (%d)\n", count);
+		else {
+			sprintf(buf, "UNKNWON - READ!!! (%d)\n", count);
+			rtn = true;
+		}
+		myprintk(buf);
+	}
+
+	return rtn;
+}
+
 /*
  * By the time we get here, we already hold the mm semaphore
  *
@@ -3621,34 +3679,32 @@ static int __handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
  * return value.  See filemap_fault() and __lock_page_or_retry().
  */
 int handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
-		unsigned int flags)
+		unsigned int flags, unsigned long long ymh_magic)
 {
 	int ret;
 
 	__set_current_state(TASK_RUNNING);
 
-	count_vm_event(PGFAULT);
-	mem_cgroup_count_vm_event(vma->vm_mm, PGFAULT);
-
-	/* do counter updates before entering really critical section. */
 	check_sync_rss_stat(current);
 
 	/*
 	 * Enable the memcg OOM handling for faults triggered in user
 	 * space.  Kernel faults are handled more gracefully.
 	 */
-	if (flags & FAULT_FLAG_USER)
+	if (flags & FAULT_FLAG_USER){
 		mem_cgroup_oom_enable();
+	}
 
 	if (!arch_vma_access_permitted(vma, flags & FAULT_FLAG_WRITE,
 					    flags & FAULT_FLAG_INSTRUCTION,
 					    flags & FAULT_FLAG_REMOTE))
 		return VM_FAULT_SIGSEGV;
 
-	if (unlikely(is_vm_hugetlb_page(vma)))
+	if (unlikely(is_vm_hugetlb_page(vma))){
 		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
+	}
 	else
-		ret = __handle_mm_fault(vma, address, flags);
+		ret = __handle_mm_fault(vma, address, flags, ymh_magic);
 
 	if (flags & FAULT_FLAG_USER) {
 		mem_cgroup_oom_disable();
@@ -3695,8 +3751,9 @@ int __pud_alloc(struct mm_struct *mm, pgd_t *pgd, unsigned long address)
 	spin_lock(&mm->page_table_lock);
 	if (pgd_present(*pgd))		/* Another has populated it */
 		pud_free(mm, new);
-	else
+	else {
 		pgd_populate(mm, pgd, new);
+	}
 	spin_unlock(&mm->page_table_lock);
 	return 0;
 }
@@ -4096,7 +4153,6 @@ void copy_user_huge_page(struct page *dst, struct page *src,
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE || CONFIG_HUGETLBFS */
 
 #if USE_SPLIT_PTE_PTLOCKS && ALLOC_SPLIT_PTLOCKS
-
 static struct kmem_cache *page_ptl_cachep;
 
 void __init ptlock_cache_init(void)

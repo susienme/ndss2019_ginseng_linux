@@ -264,6 +264,8 @@ void __init setup_arch(char **cmdline_p)
 	efi_init();
 	arm64_memblock_init();
 
+	pr_emerg("TTBR1(0x%llX) PA(swapper_pg_dir)(0x%llX)\n", read_sysreg(ttbr1_el1), (unsigned long long) __pa(swapper_pg_dir));
+
 	paging_init();
 
 	acpi_table_upgrade();

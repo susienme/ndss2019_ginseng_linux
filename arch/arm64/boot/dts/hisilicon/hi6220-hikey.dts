@@ -17,7 +17,6 @@
 	aliases {
 		serial0 = &uart0; /* On board UART0 */
 		serial1 = &uart1; /* BT UART */
-		serial2 = &uart2; /* LS Expansion UART0 */
 		serial3 = &uart3; /* LS Expansion UART1 */
 	};
 
@@ -100,10 +99,6 @@
 			status = "ok";
 		};
 
-		uart2: uart@f7112000 {
-			status = "ok";
-		};
-
 		uart3: uart@f7113000 {
 			status = "ok";
 		};
@@ -160,7 +155,7 @@
 		};
 
 		gpio4: gpio@f7020000 {
-			gpio-line-names = "USER_LED1", "USER_LED2", "USER_LED3",
+			gpio-line-names = "USER_LED1", /*"USER_LED2",*/ "USER_LED3",
 			"USER_LED4", "SD_SEL", "NC", "NC", "BT_ACTIVE";
 		};
 
@@ -256,6 +251,8 @@
 			non-removable;
 			/* WL_EN */
 			vmmc-supply = <&wlan_en_reg>;
+			// vmmc-supply = <&reg_vdd_3v3>;
+			// vmmc-supply = <&fixed_5v_hub>;
 
 			#address-cells = <0x1>;
 			#size-cells = <0x0>;
@@ -268,13 +265,15 @@
 			};
 		};
 
-		wlan_en_reg: regulator@1 {
+
+		wlan_en_reg: regulator@0 {
+		// wlan_en_reg: fixedregulator@1 {
 			compatible = "regulator-fixed";
 			regulator-name = "wlan-en-regulator";
 			regulator-min-microvolt = <1800000>;
 			regulator-max-microvolt = <1800000>;
 			/* WLAN_EN GPIO */
-			gpio = <&gpio0 5 0>;
+			gpio = <&gpio0 5 1>;
 			/* WLAN card specific delay */
 			startup-delay-us = <70000>;
 			enable-active-high;
@@ -295,11 +294,11 @@
 			linux,default-trigger = "mmc0";
 		};
 
-		user_led2 {
-			label = "user_led2";
-			gpios = <&gpio4 2 0>; /* <&gpio_user_led_3>; */
-			linux,default-trigger = "mmc1";
-		};
+		// user_led2 {
+			// label = "user_led2";
+			// gpios = <&gpio4 2 0>; /* <&gpio_user_led_3>; */
+			// linux,default-trigger = "mmc1";
+		// };
 
 		user_led1 {
 			label = "user_led1";
@@ -422,9 +421,6 @@
 	};
 };
 
-&uart2 {
-	label = "LS-UART0";
-};
 &uart3 {
 	label = "LS-UART1";
 };

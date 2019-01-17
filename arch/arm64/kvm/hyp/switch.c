@@ -66,6 +66,10 @@ static hyp_alternate_select(__activate_traps_arch,
 			    __activate_traps_nvhe, __activate_traps_vhe,
 			    ARM64_HAS_VIRT_HOST_EXTN);
 
+static void ymh_nevernever(void) {
+	while(1);
+}
+
 static void __hyp_text __activate_traps(struct kvm_vcpu *vcpu)
 {
 	u64 val;
@@ -78,6 +82,8 @@ static void __hyp_text __activate_traps(struct kvm_vcpu *vcpu)
 	 * we set FPEXC.EN to prevent traps to EL1, when setting the TFP bit.
 	 */
 	val = vcpu->arch.hcr_el2;
+	ymh_nevernever();
+	myprintk("HCR_EL2 __activate_traps val(0x%016llx)\n", val);
 	if (!(val & HCR_RW)) {
 		write_sysreg(1 << 30, fpexc32_el2);
 		isb();
@@ -94,6 +100,8 @@ static void __hyp_text __activate_traps(struct kvm_vcpu *vcpu)
 static void __hyp_text __deactivate_traps_vhe(void)
 {
 	extern char vectors[];	/* kernel exception vectors */
+	ymh_nevernever();
+	myprintk("HCR_EL2 __deactivate_traps_vhe\n");
 
 	write_sysreg(HCR_HOST_VHE_FLAGS, hcr_el2);
 	write_sysreg(CPACR_EL1_FPEN, cpacr_el1);
@@ -102,6 +110,8 @@ static void __hyp_text __deactivate_traps_vhe(void)
 
 static void __hyp_text __deactivate_traps_nvhe(void)
 {
+	ymh_nevernever();
+	myprintk("HCR_EL2 __deactivate_traps_nvhe\n");
 	write_sysreg(HCR_RW, hcr_el2);
 	write_sysreg(CPTR_EL2_DEFAULT, cptr_el2);
 }
@@ -112,6 +122,8 @@ static hyp_alternate_select(__deactivate_traps_arch,
 
 static void __hyp_text __deactivate_traps(struct kvm_vcpu *vcpu)
 {
+	ymh_nevernever();
+	myprintk("HCR_EL2 __deactivate_traps\n");
 	/*
 	 * If we pended a virtual abort, preserve it until it gets
 	 * cleared. See D1.14.3 (Virtual Interrupts) for details, but
@@ -140,6 +152,8 @@ static void __hyp_text __deactivate_vm(struct kvm_vcpu *vcpu)
 
 static void __hyp_text __vgic_save_state(struct kvm_vcpu *vcpu)
 {
+	ymh_nevernever();
+	myprintk("HCR_EL2 __vgic_save_state\n");
 	if (static_branch_unlikely(&kvm_vgic_global_state.gicv3_cpuif))
 		__vgic_v3_save_state(vcpu);
 	else
@@ -151,6 +165,9 @@ static void __hyp_text __vgic_save_state(struct kvm_vcpu *vcpu)
 static void __hyp_text __vgic_restore_state(struct kvm_vcpu *vcpu)
 {
 	u64 val;
+
+	ymh_nevernever();
+	myprintk("HCR_EL2 __vgic_restore_state\n");
 
 	val = read_sysreg(hcr_el2);
 	val |= 	HCR_INT_OVERRIDE;

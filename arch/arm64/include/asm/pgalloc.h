@@ -33,7 +33,7 @@
 
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	return (pmd_t *)__get_free_page(PGALLOC_GFP);
+	return (pmd_t *)__get_free_page(PGALLOC_GFP | ___GFP_YMH_PTP | ___GFP_YMH_PTP_PMD);
 }
 
 static inline void pmd_free(struct mm_struct *mm, pmd_t *pmd)
@@ -62,7 +62,7 @@ static inline void __pud_populate(pud_t *pud, phys_addr_t pmd, pudval_t prot)
 
 static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-	return (pud_t *)__get_free_page(PGALLOC_GFP);
+	return (pud_t *)__get_free_page(PGALLOC_GFP | ___GFP_YMH_PTP | ___GFP_YMH_PTP_PUD);
 }
 
 static inline void pud_free(struct mm_struct *mm, pud_t *pud)
@@ -93,7 +93,7 @@ extern void pgd_free(struct mm_struct *mm, pgd_t *pgd);
 static inline pte_t *
 pte_alloc_one_kernel(struct mm_struct *mm, unsigned long addr)
 {
-	return (pte_t *)__get_free_page(PGALLOC_GFP);
+	return (pte_t *)__get_free_page(PGALLOC_GFP | ___GFP_YMH_PTP | ___GFP_YMH_PTP_PT_KERNEL);
 }
 
 static inline pgtable_t
@@ -101,7 +101,7 @@ pte_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	struct page *pte;
 
-	pte = alloc_pages(PGALLOC_GFP, 0);
+	pte = alloc_pages(PGALLOC_GFP | ___GFP_YMH_PTP | ___GFP_YMH_PTP_PT, 0);
 	if (!pte)
 		return NULL;
 	if (!pgtable_page_ctor(pte)) {

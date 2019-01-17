@@ -54,9 +54,34 @@ static void __wl1271_op_remove_interface(struct wl1271 *wl,
 static void wlcore_op_stop_locked(struct wl1271 *wl);
 static void wl1271_free_ap_keys(struct wl1271 *wl, struct wl12xx_vif *wlvif);
 
+extern unsigned long pmConuters[8];
+extern char pmConutersRead[8];
+void readAllPM(void *unused) {
+	unsigned long pmCnt;
+	int cpuid = smp_processor_id();
+	if (pmConutersRead[cpuid]) return; // don't waste cycles
+
+	asm volatile (				
+	"mrs %[pmCnt], pmccntr_el0\n"
+	: [pmCnt] "=r" (pmCnt)
+	:: "memory"
+	);
+
+	pmConuters[cpuid] = pmCnt;
+	pmConutersRead[cpuid] = 1;
+}
+
 static int wl12xx_set_authorized(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 {
 	int ret;
+	unsigned long pmCnt;
+	unsigned long pmEnabled;
+	unsigned long pmcr_el0;
+	unsigned long pmovsclr_el0;
+	unsigned long pmFilter;
+	unsigned long total_cycle;
+	int i;
+	int cpuid;
 
 	if (WARN_ON(wlvif->bss_type != BSS_TYPE_STA_BSS))
 		return -EINVAL;
@@ -71,7 +96,51 @@ static int wl12xx_set_authorized(struct wl1271 *wl, struct wl12xx_vif *wlvif)
 	if (ret < 0)
 		return ret;
 
-	wl1271_info("Association completed.");
+	cpuid = smp_processor_id();
+
+	asm volatile (				
+	"mrs %[pmCnt], pmccntr_el0\n"
+	: [pmCnt] "=r" (pmCnt)
+	:: "memory"
+	);
+
+	pmConuters[cpuid] = pmCnt;
+	pmConutersRead[cpuid] = 1;
+
+	on_each_cpu(readAllPM, 0, 1);
+
+	while(1) {
+		int check = 8;
+		for (i = 0; i < 8; i++) {
+			if (pmConutersRead[i]) check--;
+		}
+		if (!check) break;
+	}
+
+	asm volatile (				
+	"mrs %[pmEnabled], PMCNTENSET_EL0\n"
+	"mrs %[pmCnt], pmccntr_el0\n"
+	"mrs %[pmcr_el0], pmcr_el0\n"
+	"mrs %[pmovsclr_el0], PMOVSCLR_EL0\n"
+	"mrs %[pmFilter], PMCCFILTR_el0\n"
+	: [pmCnt] "=r" (pmCnt), [pmEnabled] "=r" (pmEnabled), 
+	  [pmcr_el0] "=r" (pmcr_el0), [pmovsclr_el0] "=r" (pmovsclr_el0),
+	  [pmFilter] "=r" (pmFilter)
+	::"memory"
+	);
+
+	wl1271_info("Association completed :) %lu cycles enabled(0x%lx)\n"
+				"pmcr_el0(0x%lx) overflow(0x%lx) filter(0x%lx) cpu(%d)", 
+				pmCnt, pmEnabled, pmcr_el0, pmovsclr_el0, pmFilter, cpuid);
+	
+	total_cycle = 0;
+	for (i = 0; i < 8; i++) {
+		myprintk("[%d] counter: %lu cycles\n", i, pmConuters[i]);
+		total_cycle += pmConuters[i];
+	}
+
+	wl1271_info("Association completed :) %lu cycles", total_cycle);
+
 	return 0;
 }
 

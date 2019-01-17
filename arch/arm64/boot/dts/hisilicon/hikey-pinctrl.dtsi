@@ -167,15 +167,6 @@
 				>;
 			};
 
-			uart2_pmx_func: uart2_pmx_func {
-				pinctrl-single,pins = <
-					0xd8   MUX_M0	/* UART2_CTS_N  (IOMG054) */
-					0xdc   MUX_M0	/* UART2_RTS_N  (IOMG055) */
-					0xe0   MUX_M0	/* UART2_RXD    (IOMG056) */
-					0xe4   MUX_M0	/* UART2_TXD    (IOMG057) */
-				>;
-			};
-
 			uart3_pmx_func: uart3_pmx_func {
 				pinctrl-single,pins = <
 					0x180  MUX_M1	/* UART3_CTS_N  (IOMG096) */
@@ -559,17 +550,18 @@
 				pinctrl-single,drive-strength = <DRIVE1_02MA DRIVE_MASK>;
 			};
 
-			uart2_cfg_func: uart2_cfg_func {
-				pinctrl-single,pins = <
-					0xdc   0x0	/* UART2_CTS_N  (IOCFG055) */
-					0xe0   0x0	/* UART2_RTS_N  (IOCFG056) */
-					0xe4   0x0	/* UART2_RXD    (IOCFG057) */
-					0xe8   0x0	/* UART2_TXD    (IOCFG058) */
-				>;
-				pinctrl-single,bias-pulldown  = <PULL_DIS  PULL_DOWN PULL_DIS  PULL_DOWN>;
-				pinctrl-single,bias-pullup    = <PULL_DIS  PULL_UP   PULL_DIS  PULL_UP>;
-				pinctrl-single,drive-strength = <DRIVE1_02MA DRIVE_MASK>;
-			};
+			//////////////////////////// YMH_MODIFIED: deleted below
+			// uart2_cfg_func: uart2_cfg_func {
+			// 	pinctrl-single,pins = <
+			// 		0xdc   0x0	/* UART2_CTS_N  (IOCFG055) */
+			// 		0xe0   0x0	/* UART2_RTS_N  (IOCFG056) */
+			// 		0xe4   0x0	/* UART2_RXD    (IOCFG057) */
+			// 		0xe8   0x0	/* UART2_TXD    (IOCFG058) */
+			// 	>;
+			// 	pinctrl-single,bias-pulldown  = <PULL_DIS  PULL_DOWN PULL_DIS  PULL_DOWN>;
+			// 	pinctrl-single,bias-pullup    = <PULL_DIS  PULL_UP   PULL_DIS  PULL_UP>;
+			// 	pinctrl-single,drive-strength = <DRIVE1_02MA DRIVE_MASK>;
+			// };
 
 			uart3_cfg_func: uart3_cfg_func {
 				pinctrl-single,pins = <

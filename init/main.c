@@ -379,6 +379,10 @@ static void __init setup_command_line(char *command_line)
  */
 
 static __initdata DECLARE_COMPLETION(kthreadd_done);
+extern void findPagetables(int bMakeReadOnly, int bVerbose, int bTraceTablesInBlock, int bUseMyprintk, int bAddToLive);
+extern void findNormalBlocks(int bVerbose, int bUseMyprintk, int bAddToLive);
+extern void printBlockInfo_PTP(void);
+extern void printBlockInfo_normal(void);
 
 static noinline void __ref rest_init(void)
 {
@@ -404,6 +408,7 @@ static noinline void __ref rest_init(void)
 	 */
 	init_idle_bootup_task(current);
 	schedule_preempt_disabled();
+
 	/* Call into cpu_idle with preempt disabled */
 	cpu_startup_entry(CPUHP_ONLINE);
 }
@@ -467,9 +472,15 @@ static void __init mm_init(void)
 	 * page_ext requires contiguous pages,
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
-	page_ext_init_flatmem();
+	page_ext_init_flatmem();		// <---------- EMPTY
 	mem_init();
-	kmem_cache_init();
+	
+	findPagetables(false /*make RO*/, false /*verbose*/, 1 /*bTraceTablesInBlock*/, 0 /*bUseMyprintk*/, 1 /*bAddToLive*/);
+	printBlockInfo_PTP();
+	findNormalBlocks(0 /*bVerbose*/, 0 /*bUseMyprintk*/, 1 /*bAddToLive*/);
+	printBlockInfo_normal();
+
+	kmem_cache_init();	// <----- the 'heart' function is first called
 	percpu_init_late();
 	pgtable_init();
 	vmalloc_init();
@@ -500,7 +511,7 @@ asmlinkage __visible void __init start_kernel(void)
  * enable them
  */
 	boot_cpu_init();
-	page_address_init();
+	page_address_init();						// <------------- EMPTY
 	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
 	mm_init_cpumask(&init_mm);
@@ -514,6 +525,7 @@ asmlinkage __visible void __init start_kernel(void)
 	page_alloc_init();
 
 	pr_notice("Kernel command line: %s\n", boot_command_line);
+
 	parse_early_param();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
@@ -534,6 +546,7 @@ asmlinkage __visible void __init start_kernel(void)
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
+
 	mm_init();
 
 	/*
@@ -542,6 +555,7 @@ asmlinkage __visible void __init start_kernel(void)
 	 * time - but meanwhile we still have a functioning scheduler.
 	 */
 	sched_init();
+
 	/*
 	 * Disable preemption - early bootup scheduling is extremely
 	 * fragile until we cpu_idle() for the first time.
@@ -607,7 +621,7 @@ asmlinkage __visible void __init start_kernel(void)
 		initrd_start = 0;
 	}
 #endif
-	page_ext_init();
+	page_ext_init();				// <------------- EMPTY
 	debug_objects_mem_init();
 	kmemleak_init();
 	setup_per_cpu_pageset();

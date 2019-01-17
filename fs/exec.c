@@ -1646,8 +1646,9 @@ static int do_execveat_common(int fd, struct filename *filename,
 	struct files_struct *displaced;
 	int retval;
 
-	if (IS_ERR(filename))
+	if (IS_ERR(filename)) {
 		return PTR_ERR(filename);
+	}
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1755,6 +1756,7 @@ static int do_execveat_common(int fd, struct filename *filename,
 	putname(filename);
 	if (displaced)
 		put_files_struct(displaced);
+
 	return retval;
 
 out:

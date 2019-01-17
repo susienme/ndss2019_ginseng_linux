@@ -22,6 +22,12 @@
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 
+#include <linux/ginseng_conf.h>
+
+#ifdef YMH_USE_SEPARATE_BLOCKS
+extern void printBlocksInfo_LIVE(void);
+#endif /* YMH_USE_SEPARATE_BLOCKS */
+
 #ifdef CONFIG_HAVE_RCU_TABLE_FREE
 
 #define tlb_remove_entry(tlb, entry)	tlb_remove_table(tlb, entry)

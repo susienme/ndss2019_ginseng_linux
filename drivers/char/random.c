@@ -812,7 +812,6 @@ static int crng_fast_load(const char *cp, size_t len)
 	if (crng_init_cnt >= CRNG_INIT_CNT_THRESH) {
 		crng_init = 1;
 		wake_up_interruptible(&crng_init_wait);
-		pr_notice("random: fast init done\n");
 	}
 	spin_unlock_irqrestore(&primary_crng.lock, flags);
 	return 1;

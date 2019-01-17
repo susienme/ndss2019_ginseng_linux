@@ -128,12 +128,19 @@ u32 optee_do_call_with_arg(struct tee_context *ctx, phys_addr_t parg)
 	reg_pair_from_64(&param.a1, &param.a2, parg);
 	/* Initialize waiter */
 	optee_cq_wait_init(&optee->call_queue, &w);
+	unsigned int daif = arch_local_save_flags();
+	myprintk("Calling SMC DAIF org(0x%x)\n", daif);
+
+	daif &= 0xFEFF; // Unmask A bit
+	arch_local_irq_restore(daif);
+	myprintk("Calling SMC DAIF changed(0x%x)\n", daif);
+
 	while (true) {
 		struct arm_smccc_res res;
 
-		optee->invoke_fn(param.a0, param.a1, param.a2, param.a3,
+		ymh_arm_smccc_smc(param.a0, param.a1, param.a2, param.a3,
 				 param.a4, param.a5, param.a6, param.a7,
-				 &res);
+			 &res);
 
 		if (res.a0 == OPTEE_SMC_RETURN_ETHREAD_LIMIT) {
 			/*

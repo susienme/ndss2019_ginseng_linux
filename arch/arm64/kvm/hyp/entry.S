@@ -185,6 +185,9 @@ alternative_endif
 	bl	__fpsimd_restore_state
 
 	// Skip restoring fpexc32 for AArch64 guests
+88:
+	b 88b	// <-- NO NO
+
 	mrs	x1, hcr_el2
 	tbnz	x1, #HCR_RW_SHIFT, 1f
 	ldr	x4, [x3, #VCPU_FPEXC32_EL2]

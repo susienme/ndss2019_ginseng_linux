@@ -27,19 +27,54 @@
 #include <asm/tlbflush.h>
 
 static struct kmem_cache *pgd_cache;
+#ifdef YMH_USE_SEPARATE_BLOCKS
+extern int removePage(unsigned long long page_vaddr, int bPTP);
+extern void printBlocksInfo_LIVE(void);
+static void *pgds[2048];
+static int pgds_idx = 0;
+
+static void addPgd(void *pgdAddr) {
+	pgds[pgds_idx++] = pgdAddr;
+}
+
+static void removePgd(void *pgdAddr) {
+	int i;
+	for (i = 0; i < pgds_idx; i++)
+		if (pgds[i] == pgdAddr) {
+			pgds[i] = 0ULL;
+			return;
+		}
+	myprintk("REMOVE_PGD ERROR - PGD is allocated from where?\n");
+}
+
+static void printAllPgds(void) {
+	int i;
+	for (i = 0; i < pgds_idx; i++)
+		myprintk("%04d: 0x%llX\n", i, (unsigned long long) pgds[i]);
+}
+#endif
 
 pgd_t *pgd_alloc(struct mm_struct *mm)
 {
-	if (PGD_SIZE == PAGE_SIZE)
-		return (pgd_t *)__get_free_page(PGALLOC_GFP);
+	if (PGD_SIZE == PAGE_SIZE) {
+		
+		pgd_t *rtn = (pgd_t *)__get_free_page(PGALLOC_GFP | ___GFP_YMH_PTP | ___GFP_YMH_PTP_PGD);
+
+		#ifdef YMH_USE_SEPARATE_BLOCKS
+		addPgd((void *)rtn);
+		#endif
+
+		return rtn;
+	}
 	else
 		return kmem_cache_alloc(pgd_cache, PGALLOC_GFP);
 }
 
 void pgd_free(struct mm_struct *mm, pgd_t *pgd)
 {
-	if (PGD_SIZE == PAGE_SIZE)
+	if (PGD_SIZE == PAGE_SIZE) {
 		free_page((unsigned long)pgd);
+	}
 	else
 		kmem_cache_free(pgd_cache, pgd);
 }

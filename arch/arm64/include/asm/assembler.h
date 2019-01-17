@@ -122,6 +122,12 @@ lr	.req	x30		// link register
 	b	\label
 	.endm
 
+	.macro	smcventry	label
+	.align	7
+	smc #10
+	b	\label
+	.endm
+
 /*
  * Select code when configured for BE.
  */

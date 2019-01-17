@@ -41,6 +41,14 @@ struct vm_area_struct;
 #define ___GFP_OTHER_NODE	0x800000u
 #define ___GFP_WRITE		0x1000000u
 #define ___GFP_KSWAPD_RECLAIM	0x2000000u
+#define ___GFP_YMH_PTP				0x04000000u
+#define ___GFP_YMH_PTP_PGD			0x10000000u
+#define ___GFP_YMH_PTP_PUD			0x20000000u
+#define ___GFP_YMH_PTP_PMD			0x40000000u
+#define ___GFP_YMH_PTP_PT			0x80000000u
+#define ___GFP_YMH_PTP_PT_KERNEL	0xA0000000u
+#define ___GFP_YMH_ALL				(___GFP_YMH_PTP | ___GFP_YMH_PTP_PGD | ___GFP_YMH_PTP_PUD | ___GFP_YMH_PTP_PMD | ___GFP_YMH_PTP_PT | ___GFP_YMH_PTP_PT_KERNEL)
+
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
 
 /*
@@ -473,7 +481,7 @@ extern struct page *alloc_pages_vma(gfp_t gfp_mask, int order,
 			int node, bool hugepage);
 #define alloc_hugepage_vma(gfp_mask, vma, addr, order)	\
 	alloc_pages_vma(gfp_mask, order, vma, addr, numa_node_id(), true)
-#else
+#else 	// <--------------- #ifdef CONFIG_NUMA
 #define alloc_pages(gfp_mask, order) \
 		alloc_pages_node(numa_node_id(), gfp_mask, order)
 #define alloc_pages_vma(gfp_mask, order, vma, addr, node, false)\

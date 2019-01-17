@@ -69,6 +69,62 @@
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 #include "internal.h"
+#include <linux/ginseng_conf.h>
+
+extern int bTraceFault;
+extern int ginseng_bReadonlyTables;
+extern unsigned long long findOA(unsigned long long addr, int bKaddr, const char* blanks, const char* who, int bCheckAP, int *pIsBlock, int bSilent, int bUseMyprintk);
+
+#ifdef YMH_USE_SEPARATE_BLOCKS
+#define NR_BLOCKS_FOR_TABLES	1024 //512
+#define NR_PAGES_PER_BLOCK		1024
+typedef struct _blocks {
+	void *blocks[NR_BLOCKS_FOR_TABLES];
+	int nrBlocks;		// <-- no more index: index is meaningless because LIVE adds and removes blocks dynamically.
+	void *pages[NR_BLOCKS_FOR_TABLES][NR_PAGES_PER_BLOCK];
+	int nrPages[NR_BLOCKS_FOR_TABLES];	// <-- no more index: index is meaningless because LIVE adds and removes blocks dynamically.
+	spinlock_t lock;
+} blocks;
+
+static blocks blocksForPTP_LIVE = {
+		.blocks = {NULL},
+		.nrBlocks = 0,
+		.pages = {NULL},
+		.nrPages = {0},
+		.lock = __SPIN_LOCK_UNLOCKED(blocksForPTP_LIVE.lock),
+	};
+
+static blocks blocksForNormalPage_LIVE = {
+		.blocks = {NULL},
+		.nrBlocks = 0,
+		.pages = {NULL},
+		.nrPages = {0},
+		.lock = __SPIN_LOCK_UNLOCKED(blocksForNormalPage_LIVE.lock),
+	};
+
+static unsigned long long isInBlockRange(unsigned long long page_vaddr, void **list, int nr, spinlock_t *lock);
+static /*inline*/ struct page *getPageNotFromPageset(struct zone *zone, int migratetype, int bForPT, int starting_order);
+static unsigned int addBlockNoDup(unsigned long long block_paddr, blocks *pBlocksInfo, unsigned long long page_vaddr, int *pBlockIdx_out, int *pPageIdx_out);
+static void printBlockRange(void **list, int nr, spinlock_t *lock);
+
+#define isInNormalBlockRange(addr) \
+	isInBlockRange(addr, blocksForNormalPage_LIVE.blocks, blocksForNormalPage_LIVE.nrBlocks, &blocksForNormalPage_LIVE.lock)
+
+#if 0
+#define isInPTPBlockRange(addr) \
+	isInBlockRange(addr, blocksForPTP_LIVE.blocks, blocksForPTP_LIVE.nrBlocks, &blocksForPTP_LIVE.lock)
+#else
+int isInPTPBlockRange(unsigned long long addr) {
+	return isInBlockRange(addr, blocksForPTP_LIVE.blocks, blocksForPTP_LIVE.nrBlocks, &blocksForPTP_LIVE.lock);
+}
+#endif
+
+void print_ptpBlocks_live(void) {
+	printBlockRange(blocksForPTP_LIVE.blocks, blocksForPTP_LIVE.nrBlocks, &blocksForPTP_LIVE.lock);
+}
+
+
+#endif /* YMH_USE_SEPARATE_BLOCKS */
 
 /* prevent >1 _updater_ of zone percpu pageset ->high and ->batch fields */
 static DEFINE_MUTEX(pcp_batch_high_lock);
@@ -705,7 +761,7 @@ static inline void set_page_order(struct page *page, unsigned int order)
 	__SetPageBuddy(page);
 }
 
-static inline void rmv_page_order(struct page *page)
+static noinline void rmv_page_order(struct page *page)
 {
 	__ClearPageBuddy(page);
 	set_page_private(page, 0);
@@ -888,7 +944,7 @@ out:
  * try and check multiple fields with one check. The caller must do a detailed
  * check if necessary.
  */
-static inline bool page_expected_state(struct page *page,
+static noinline bool page_expected_state(struct page *page,
 					unsigned long check_flags)
 {
 	if (unlikely(atomic_read(&page->_mapcount) != -1))
@@ -914,7 +970,7 @@ static void free_pages_check_bad(struct page *page)
 	bad_flags = 0;
 
 	if (unlikely(atomic_read(&page->_mapcount) != -1))
-		bad_reason = "nonzero mapcount";
+		bad_reason = "nonzero mapcount free_pages";
 	if (unlikely(page->mapping != NULL))
 		bad_reason = "non-NULL mapping";
 	if (unlikely(page_ref_count(page) != 0))
@@ -1659,7 +1715,7 @@ static void check_new_page_bad(struct page *page)
 	unsigned long bad_flags = 0;
 
 	if (unlikely(atomic_read(&page->_mapcount) != -1))
-		bad_reason = "nonzero mapcount";
+		bad_reason = "nonzero mapcount new_page";
 	if (unlikely(page->mapping != NULL))
 		bad_reason = "non-NULL mapping";
 	if (unlikely(page_ref_count(page) != 0))
@@ -1711,18 +1767,18 @@ static bool check_new_pcp(struct page *page)
 {
 	return check_new_page(page);
 }
-#else
+#else // <---------------- here
 static bool check_pcp_refill(struct page *page)
 {
 	return check_new_page(page);
 }
 static bool check_new_pcp(struct page *page)
 {
-	return false;
+	return false; // <-------- always return 0
 }
 #endif /* CONFIG_DEBUG_VM */
 
-static bool check_new_pages(struct page *page, unsigned int order)
+static noinline bool check_new_pages(struct page *page, unsigned int order)
 {
 	int i;
 	for (i = 0; i < (1 << order); i++) {
@@ -1785,31 +1841,159 @@ static void prep_new_page(struct page *page, unsigned int order, gfp_t gfp_flags
  * Go through the free lists for the given migratetype and remove
  * the smallest available page from the freelists
  */
+// #if 0 		// 0: mine     1: original
+#ifndef YMH_USE_SEPARATE_BLOCKS
 static inline
 struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
-						int migratetype)
+                                                int migratetype, gfp_t gfp_flags)
+{
+    unsigned int current_order;
+    struct free_area *area;
+    struct page *page;
+
+    /* Find a page of the appropriate size in the preferred list */
+    for (current_order = order; current_order < MAX_ORDER; ++current_order) {
+        area = &(zone->free_area[current_order]);
+        page = list_first_entry_or_null(&area->free_list[migratetype],
+                                                struct page, lru);
+        if (!page)
+                continue;
+
+        #if 0
+        addr = (unsigned long long) page_address(page);
+        if ( gfp_flags & ___GFP_YMH_PTP ) { // pagetalbe page - PGD/PUD/PMD/PT
+			if ( !(blockAddr = isInNormalBlockRange(addr)) ) {	// check if a pagetable page belongs to a normal_block
+				// page = getPageNotFromPageset(zone, migratetype, 1 /*bForPT*/, current_order /*starting order*/);
+				// addr = (unsigned long long) page_address(page);
+				// bPageRemoved = 1;
+
+				// // double check, a PTP must not belong to Normal Page
+				// if ( isInNormalBlockRange(addr) ) myloop(1); //panic("NOT FROM PAGESET FAILED for PTP");
+
+				blockAddr = findOA(addr, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/);
+
+				if (bBlock) {	// add the block to blocksForPT
+					addedResult = addBlockNoDup(blockAddr, &blocksForPTP_LIVE, addr, NULL, NULL);
+				} //else myloop(2); //myprintk("PTP (0x%llX) not in a block\n", addr);
+
+				pr_emerg("OK---1(%d)\n", bBlock);
+			}
+		} else {
+			// NORMAL PAGE
+			if ( !(blockAddr = isInPTPBlockRange(addr)) ) {	// Yes, not in PT_BLOCK
+				// page = getPageNotFromPageset(zone, migratetype, 0 /*bForPT*/, 0 /*starting order*/);
+				// addr = (unsigned long long) page_address(page);
+				// bPageRemoved = 1;
+
+				// if ( isInPTPBlockRange(addr) ) myloop(3); //panic("NOT FROM PAGESET FAILED for Normal pages");
+
+				blockAddr = findOA(addr, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/);
+
+				if (bBlock) {	// add the block to blocksForNonPT
+					addedResult = addBlockNoDup(blockAddr, &blocksForNormalPage_LIVE, addr, NULL, NULL);
+				} //else pr_emerg("ADD_PAGE Normal (0x%llX) not in a block\n", addr);
+
+				pr_emerg("OK---2(%d)\n", bBlock);
+			} //else myprintk("Normal page @ 0x%llX is in a block @ 0x%llX for PTPs try(%d)\n", addr, blockAddr, try);
+        	// pr_emerg("OK\n");
+		}
+		#endif
+
+        list_del(&page->lru);
+        rmv_page_order(page);
+        area->nr_free--;
+        expand(zone, page, order, current_order, area, migratetype);
+        set_pcppage_migratetype(page, migratetype);
+        return page;
+    }
+
+    return NULL;
+}
+#else
+static noinline void myloop(unsigned long k) {
+hoho:
+	pr_emerg("MYLOOP 0x%lX", k);
+	goto hoho;
+}
+
+int smallest_hit = 0;
+static inline
+struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
+						int migratetype, gfp_t gfp_flags)
 {
 	unsigned int current_order;
 	struct free_area *area;
-	struct page *page;
+	struct page *page = NULL;
+	unsigned long long addr;
+	unsigned long long blockAddr = 1ULL;
+	int bBlock;
+	unsigned int addedResult;
+	int bPageRemoved = 0;
 
-	/* Find a page of the appropriate size in the preferred list */
+	current_order = order;
+	smallest_hit++;
+
 	for (current_order = order; current_order < MAX_ORDER; ++current_order) {
-		area = &(zone->free_area[current_order]);
-		page = list_first_entry_or_null(&area->free_list[migratetype],
-							struct page, lru);
-		if (!page)
-			continue;
+        area = &(zone->free_area[current_order]);
+        page = list_first_entry_or_null(&area->free_list[migratetype], struct page, lru);
+
+        if (page) break;
+    }
+
+	addr = (unsigned long long) page_address(page);
+	if ( gfp_flags & ___GFP_YMH_PTP ) { // pagetalbe page - PGD/PUD/PMD/PT
+		if (page) blockAddr = isInNormalBlockRange(addr);
+		if (!page && blockAddr) pr_emerg("###YMH### 1(%d)-> not from PCP - 1\n", (int) blockAddr);
+
+		if ( blockAddr != 0ULL ) {	// check if a pagetable page belongs to a normal_block
+			// yes it belones to normal (blockAddr != 0) --> re-find
+			page = getPageNotFromPageset(zone, migratetype, 1 /*bForPT*/, current_order /*starting order*/);
+			addr = (unsigned long long) page_address(page);
+			bPageRemoved = 1;
+
+			// double check, a PTP must not belong to Normal Page
+			// still in Normal? --> error
+			if ( isInNormalBlockRange(addr) ) myloop(1); //panic("NOT FROM PAGESET FAILED for PTP");
+
+			blockAddr = findOA(addr, 1 /*bKaddr*/, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+
+			if (bBlock) {	// add the block to blocksForPT
+				addedResult = addBlockNoDup(blockAddr, &blocksForPTP_LIVE, addr, NULL, NULL);
+			} else myloop(2); //myprintk("PTP (0x%llX) not in a block\n", addr);
+		}
+	} else {
+		// NORMAL PAGE
+		if (page) blockAddr = isInPTPBlockRange(addr);
+		if (!page && blockAddr) pr_emerg("###YMH### 1(%d)-> not from PCP - 2\n", (int) blockAddr);
+
+		if ( blockAddr != 0ULL ) {	// Yes, in PT_BLOCK (blockAddr != 0) --> re-find
+			page = getPageNotFromPageset(zone, migratetype, 0 /*bForPT*/, current_order /*0*/ /*starting order*/);
+			addr = (unsigned long long) page_address(page);
+			bPageRemoved = 1;
+
+			// still in PT? -> error
+			if ( isInPTPBlockRange(addr) ) myloop(3); //panic("NOT FROM PAGESET FAILED for Normal pages");
+
+			blockAddr = findOA(addr, 1 /*bKaddr*/, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+
+			if (bBlock) {	// add the block to blocksForNonPT
+				addedResult = addBlockNoDup(blockAddr, &blocksForNormalPage_LIVE, addr, NULL, NULL);
+			} //else pr_emerg("ADD_PAGE Normal (0x%llX) not in a block\n", addr);
+
+		} //else myprintk("Normal page @ 0x%llX is in a block @ 0x%llX for PTPs try(%d)\n", addr, blockAddr, try);
+	}
+
+	if (!bPageRemoved && page) {
 		list_del(&page->lru);
 		rmv_page_order(page);
 		area->nr_free--;
 		expand(zone, page, order, current_order, area, migratetype);
 		set_pcppage_migratetype(page, migratetype);
-		return page;
 	}
 
-	return NULL;
+	return page;
 }
+#endif  // __rmqueue_smallest
 
 
 /*
@@ -1830,9 +2014,9 @@ static int fallbacks[MIGRATE_TYPES][4] = {
 
 #ifdef CONFIG_CMA
 static struct page *__rmqueue_cma_fallback(struct zone *zone,
-					unsigned int order)
+					unsigned int order, gfp_t gfp_flags)
 {
-	return __rmqueue_smallest(zone, order, MIGRATE_CMA);
+	return __rmqueue_smallest(zone, order, MIGRATE_CMA, gfp_flags);
 }
 #else
 static inline struct page *__rmqueue_cma_fallback(struct zone *zone,
@@ -2113,7 +2297,7 @@ static void unreserve_highatomic_pageblock(const struct alloc_context *ac)
 
 /* Remove an element from the buddy allocator from the fallback list */
 static inline struct page *
-__rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
+__rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype, gfp_t gfp_flags)
 {
 	struct free_area *area;
 	unsigned int current_order;
@@ -2161,22 +2345,28 @@ __rmqueue_fallback(struct zone *zone, unsigned int order, int start_migratetype)
 	return NULL;
 }
 
+extern unsigned int main_hit;
 /*
  * Do the hard work of removing an element from the buddy allocator.
  * Call me with the zone->lock already held.
  */
 static struct page *__rmqueue(struct zone *zone, unsigned int order,
-				int migratetype)
+				int migratetype, gfp_t gfp_flags)
 {
 	struct page *page;
 
-	page = __rmqueue_smallest(zone, order, migratetype);
+	main_hit = ((main_hit >> 8) << 8) | 2;
+	page = __rmqueue_smallest(zone, order, migratetype, gfp_flags);
 	if (unlikely(!page)) {
-		if (migratetype == MIGRATE_MOVABLE)
-			page = __rmqueue_cma_fallback(zone, order);
+		if (migratetype == MIGRATE_MOVABLE) {
+			page = __rmqueue_cma_fallback(zone, order, gfp_flags);
+			main_hit = ((main_hit >> 8) << 8) | 4;
+		}
 
-		if (!page)
-			page = __rmqueue_fallback(zone, order, migratetype);
+		if (!page) {
+			page = __rmqueue_fallback(zone, order, migratetype, gfp_flags);
+			main_hit = ((main_hit >> 8) << 8) | 8;
+		}
 	}
 
 	trace_mm_page_alloc_zone_locked(page, order, migratetype);
@@ -2190,13 +2380,13 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
  */
 static int rmqueue_bulk(struct zone *zone, unsigned int order,
 			unsigned long count, struct list_head *list,
-			int migratetype, bool cold)
+			int migratetype, bool cold, gfp_t gfp_flags)
 {
 	int i;
 
 	spin_lock(&zone->lock);
 	for (i = 0; i < count; ++i) {
-		struct page *page = __rmqueue(zone, order, migratetype);
+		struct page *page = __rmqueue(zone, order, migratetype, gfp_flags);
 		if (unlikely(page == NULL))
 			break;
 
@@ -2575,6 +2765,562 @@ static inline void zone_statistics(struct zone *preferred_zone, struct zone *z,
 #endif
 }
 
+#if 0
+// if in a block, return the addr
+// if not in a block, return NULL
+static unsigned long long isInBlockRange(unsigned long long page_vaddr, void **list, int idx) {
+	int i;
+	unsigned long long blockStartingAddr;
+
+	for (i = 0; /*i < NR_BLOCKS_FOR_TABLES ||*/ i < idx; i++) {
+		blockStartingAddr = (unsigned long long) list[i];
+		if (blockStartingAddr <= page_vaddr && 
+			page_vaddr < (blockStartingAddr + 0x200000) ) return blockStartingAddr;
+	}
+
+	return 0;
+}
+static int isInBlock(unsigned long long vaddr, void **list, int idx) {
+	int i;
+
+	for (i = 0; /*i < NR_BLOCKS_FOR_TABLES ||*/ i < idx; i++) 
+		if ((unsigned long long) list[i] == vaddr) return 1;
+
+	return 0;
+}
+
+static void addBlockNoDup(unsigned long long paddr, void **list, int *pIdx) {
+	unsigned long long vaddr = (unsigned long long) __va(paddr);
+
+	if (*pIdx >= NR_BLOCKS_FOR_TABLES) {
+		myprintk("Cannnot add more blocks to %s\n", list == blocksForPT ? "blocksForPT" : "blocksForNonPT");
+		return;
+	}
+
+	// return when there is a duplicate entry
+	if (isInBlock(vaddr, list, *pIdx)) return;
+
+	if (list == blocksForNonPT) 
+		myprintk("ADDING BLOCK NORMAL_BLOCK (0x%llX)\n", vaddr);
+	else 
+		myprintk("ADDING BLOCK PT_BLOCK (0x%llX)\n", vaddr);
+
+	list[(*pIdx)++] = (void *) vaddr;
+}
+void printBlocksForPT_LIVE(void) {
+	int i;
+
+	for (i = 0; i < idx_blocksForPT; i++) {
+		myprintk("[LIVE] 0x%llX has table(s)\n", blocksForPT[i]);
+	}
+	myprintk("[LIVE] %d blocks have tables\n", i);
+	for (i = 0; i < idx_blocksForNonPT; i++) {
+		myprintk("[LIVE] 0x%llX has normal page(s)\n", blocksForNonPT[i]);
+	}
+	myprintk("[LIVE] %d blocks have normal pages\n", idx_blocksForNonPT);
+}
+#else
+#ifdef YMH_USE_SEPARATE_BLOCKS
+// returns found block list index
+static int findBlockInBlocks(unsigned long long block_vaddr, void **blockList, int nrBlocks) {
+	int i;
+	int blockFound;
+
+	for (i = 0, blockFound = 0; i < NR_BLOCKS_FOR_TABLES && blockFound < nrBlocks; i++) {
+		if (blockList[i]) {
+		 	if (blockList[i] == (void *) block_vaddr) return i;
+			blockFound++;
+		}
+	}
+
+	return -1;
+}
+
+static int findFirstEmptyBlockSlot(void **blockList) {
+	int i;
+	for (i = 0; i < NR_BLOCKS_FOR_TABLES; i++) {
+		if (!blockList[i]) return i;
+	}
+	return -1;
+}
+
+static int findFirstEmptyPageSlot(void **pageList) {
+	int i;
+	for (i = 0; i < NR_PAGES_PER_BLOCK; i++) {
+		if (!pageList[i]) return i;
+	}
+	return -1;	
+}
+
+// Assume a proper lock is held
+// return idx if found
+// otherwise, return -1
+static int findPageIdxInBlock(unsigned long long page_vaddr, void **pageList, int nr) {
+	int i;
+	int foundPages;
+
+	for (i = 0, foundPages = 0; i < NR_PAGES_PER_BLOCK && foundPages < nr; i++) {
+		if (pageList[i]) {
+			if (pageList[i] == (void *) page_vaddr) return i;
+			foundPages++;
+		}
+	}
+
+	return -1;
+}
+
+unsigned int addBlockNoDupPTP_LIVE(unsigned long long block_paddr, unsigned long long page_vaddr) {
+	return addBlockNoDup(block_paddr, &blocksForPTP_LIVE, page_vaddr, NULL, NULL);
+}
+
+unsigned int addBlockNoDupNormal_LIVE(unsigned long long block_paddr, unsigned long long page_vaddr) {
+	return addBlockNoDup(block_paddr, &blocksForNormalPage_LIVE, page_vaddr, NULL, NULL);
+}
+
+#define ADD_BLOCK_RTN_NONE 			0x00000000
+#define ADD_BLOCK_RTN_ADDED_BLOCK	0x00000001
+#define ADD_BLOCK_RTN_ADDED_PAGE	0x00000002
+static unsigned int addBlockNoDup(unsigned long long block_paddr, blocks *pBlocksInfo, unsigned long long page_vaddr, int *pBlockIdx_out, int *pPageIdx_out) {
+	unsigned long long block_vaddr = (unsigned long long) __va(block_paddr);
+	int block_idx = 0;
+	int page_idx = 0;
+	int *pNrPage;
+	int *pNrBlock;
+	void **pageList;
+	void **blockList = pBlocksInfo->blocks;
+	unsigned int rtn = ADD_BLOCK_RTN_NONE;
+
+	spin_lock(&pBlocksInfo->lock);
+
+	if (pBlocksInfo == &blocksForPTP_LIVE) pNrBlock = &blocksForPTP_LIVE.nrBlocks;
+	else pNrBlock = &blocksForNormalPage_LIVE.nrBlocks;
+
+	if (*pNrBlock >= NR_BLOCKS_FOR_TABLES) {
+		myprintk("Watch out! block info is almost full!\n");
+		spin_unlock(&pBlocksInfo->lock);
+		return rtn;
+	}
+
+	block_idx = findBlockInBlocks(block_vaddr, blockList, *pNrBlock);
+
+	// new block? -> add it
+	if ( block_idx == -1 ) {
+		block_idx = findFirstEmptyBlockSlot(blockList);
+		if (block_idx == -1) {
+			oopsloop1:
+			panic("NO MORE SPACE FOR LIVE");
+			goto oopsloop1;
+		}
+
+		blockList[block_idx] = (void *) block_vaddr;
+		(*pNrBlock)++;
+		rtn |= ADD_BLOCK_RTN_ADDED_BLOCK;
+	}
+	if (pBlockIdx_out) *pBlockIdx_out = block_idx;
+	
+
+	if (pBlocksInfo == &blocksForPTP_LIVE) {
+		pNrPage = &blocksForPTP_LIVE.nrPages[block_idx];
+		pageList = blocksForPTP_LIVE.pages[block_idx];
+	} else {
+		pNrPage = &blocksForNormalPage_LIVE.nrPages[block_idx];
+		pageList = blocksForNormalPage_LIVE.pages[block_idx];
+	}
+
+	if (page_vaddr) {
+		page_idx = findPageIdxInBlock(page_vaddr, pageList, *pNrPage);
+		
+		// new page? -> add it
+		if ( page_idx == -1 ) {
+			page_idx = findFirstEmptyPageSlot(pageList);
+			if (page_idx == -1) {
+			oopsloop:
+				myprintk("ERROR!!\n");
+				goto oopsloop;
+			}
+			pageList[page_idx] = (void *) page_vaddr;
+			(*pNrPage)++;
+			if (pPageIdx_out) *pPageIdx_out = page_idx;
+			spin_unlock(&pBlocksInfo->lock);
+			return (rtn | ADD_BLOCK_RTN_ADDED_PAGE);
+		}
+
+		if (pPageIdx_out) *pPageIdx_out = page_idx;
+	}
+	spin_unlock(&pBlocksInfo->lock);
+	return rtn;
+}
+
+#define BLOCKINFO_LOG_MASK_ALL			0b1110
+#define BLOCKINFO_LOG_MASK_BLOCKS		0b0010
+#define BLOCKINFO_LOG_MASK_PTP_PAGES	0b0100
+#define BLOCKINFO_LOG_MASK_NORMAL_PAGES	0b1000
+void printBlocksInfo_LIVE(int logMask) {
+	int i, j;
+	blocks *pBlocks;
+	int nrBlocks;
+	int nrPages;
+	void **blockList;
+	void **pageList;
+	int *pNrPages;
+	int total_paegs;
+	int foundBlocks;
+	int foundPages;
+
+	pBlocks = &blocksForPTP_LIVE;
+	nrBlocks = pBlocks->nrBlocks;
+	blockList = pBlocks->blocks;
+	pNrPages = pBlocks->nrPages;
+	total_paegs = 0;
+	foundBlocks = 0;
+
+	myprintk("[LIVE] Blocks for PTP\n");
+	for (i = 0, foundBlocks = 0; i < NR_BLOCKS_FOR_TABLES && foundBlocks < nrBlocks; i++) {
+		if (blockList[i]) {
+			foundBlocks++;
+			
+			nrPages = pNrPages[i];
+			pageList = pBlocks->pages[i];// //pPageList[i];
+			foundPages = 0;
+			if (logMask & BLOCKINFO_LOG_MASK_BLOCKS) myprintk("[LIVE] Block @ 0x%llX has %d pages:\n", blockList[i], nrPages);
+			for (j = 0; j < NR_PAGES_PER_BLOCK && foundPages < nrPages; j++) {
+				if (pageList[j]) {
+					foundPages++;
+					if (logMask & BLOCKINFO_LOG_MASK_PTP_PAGES) myprintk("  [LIVE] 0x%llX\n", pageList[j]);
+				}
+			}
+			total_paegs += foundPages;
+		}
+	}
+	myprintk("[LIVE] STAT: %d blocks %d pages\n\n", foundBlocks, total_paegs);
+
+	pBlocks = &blocksForNormalPage_LIVE;
+	nrBlocks = pBlocks->nrBlocks;
+	blockList = pBlocks->blocks;
+	pNrPages = pBlocks->nrPages;
+	total_paegs = 0;
+	foundBlocks = 0;
+
+	myprintk("[LIVE] Blocks for Normal Pages\n");
+	for (i = 0, foundBlocks = 0; i < NR_BLOCKS_FOR_TABLES && foundBlocks < nrBlocks; i++) {
+		if (blockList[i]) {
+			foundBlocks++;
+			
+			nrPages = pNrPages[i];
+			pageList = pBlocks->pages[i];// //pPageList[i];
+			foundPages = 0;
+			if (logMask & BLOCKINFO_LOG_MASK_BLOCKS) myprintk("[LIVE] Block @ 0x%llX has %d pages:\n", blockList[i], nrPages);
+			for (j = 0; j < NR_PAGES_PER_BLOCK && foundPages < nrPages; j++) {
+				if (pageList[j]) {
+					foundPages++;
+					if (logMask & BLOCKINFO_LOG_MASK_NORMAL_PAGES) myprintk("  [LIVE] 0x%llX\n", pageList[j]);
+				}
+			}
+			total_paegs += foundPages;
+		}
+	}
+	myprintk("[LIVE] STAT: %d blocks %d pages\n", foundBlocks, total_paegs);
+
+
+}
+
+// if in a block, return the addr
+// if not in a block, return NULL
+static noinline unsigned long long isInBlockRange(unsigned long long page_vaddr, void **list, int nr, spinlock_t *lock) {
+	int i;
+	int foundBlocks;
+	unsigned long long blockStartingAddr;
+
+	spin_lock(lock);
+	for (i = 0, foundBlocks = 0; i < NR_BLOCKS_FOR_TABLES && foundBlocks < nr; i++) {
+		if (list[i]) {
+			blockStartingAddr = (unsigned long long) list[i];
+			if (blockStartingAddr <= page_vaddr && 
+				page_vaddr < (blockStartingAddr + 0x200000) ) {
+						spin_unlock(lock);
+						return blockStartingAddr;
+					}
+			foundBlocks++;
+		}
+	}
+
+	spin_unlock(lock);
+	return 0;
+}
+
+static void printBlockRange(void **list, int nr, spinlock_t *lock) {
+	int i;
+	int foundBlocks;
+	unsigned long long blockStartingAddr;
+
+	spin_lock(lock);
+	for (i = 0, foundBlocks = 0; i < NR_BLOCKS_FOR_TABLES && foundBlocks < nr; i++) {
+		if (list[i]) {
+			blockStartingAddr = (unsigned long long) list[i];
+			myprintk("[%2d] 0x%llX - 0x%llX\n", foundBlocks, blockStartingAddr, blockStartingAddr + 0x200000);
+			foundBlocks++;
+		}
+	}
+
+	spin_unlock(lock);
+}
+
+// if not found, return -1
+static int findBlockIdx(unsigned long long page_vaddr, blocks *pBlockInfo)  {
+	int i, nr, foundBlocks;
+	void **blockList;
+	unsigned long long blockStartingAddr;
+
+	blockList = pBlockInfo->blocks;
+	nr = pBlockInfo->nrBlocks;
+	for (i = 0, foundBlocks = 0; i < NR_BLOCKS_FOR_TABLES && foundBlocks < nr; i++) {
+		if (blockList[i]) {
+			blockStartingAddr = (unsigned long long) blockList[i];
+			if (blockStartingAddr <= page_vaddr && 
+				page_vaddr < (blockStartingAddr + 0x200000ULL) ) return i;
+			foundBlocks++;
+		}
+	}
+
+	return -1;
+}
+
+static int removePage(unsigned long long page_vaddr, int bPTP) {
+	blocks *pBlocks;
+	int block_idx;
+	int page_idx;
+
+	if (bPTP) pBlocks = &blocksForPTP_LIVE;
+	else pBlocks = &blocksForNormalPage_LIVE;
+
+	spin_lock(&pBlocks->lock);
+
+	// find block_idx, page_idx and remove
+	block_idx = findBlockIdx(page_vaddr, pBlocks);
+	if (block_idx == -1) {
+		// the page does not belong to a block.
+		// don't need to remove it
+		unsigned long long blockAddr;
+		int bBlock;
+		blockAddr = findOA(page_vaddr, 1 /*bKaddr*/, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+		
+		spin_unlock(&pBlocks->lock);
+		return 0;
+	} else {
+		page_idx = findPageIdxInBlock(page_vaddr, pBlocks->pages[block_idx], pBlocks->nrPages[block_idx]);
+		pBlocks->pages[block_idx][page_idx] = 0ULL;
+		if (--(pBlocks->nrPages[block_idx]) == 0) {
+			// no more pages for this block -> remove the block, too
+			pBlocks->blocks[block_idx] = 0UL;
+			pBlocks->nrBlocks--;
+		}
+		spin_unlock(&pBlocks->lock);
+		return 0;
+	}
+
+	spin_unlock(&pBlocks->lock);
+	return -1;
+}
+
+
+static int removePageAuto(unsigned long long page_vaddr) {
+	if ( removePage(page_vaddr, 0 /*bPTP*/) )
+		return removePage(page_vaddr, 1 /*bPTP*/);
+
+	return 0;
+}
+#endif /* YMH_USE_SEPARATE_BLOCKS */
+#endif
+
+
+
+#if 0
+static struct page *getPageNotFromPageset(struct zone *zone, int bForPT, int migratetype) {
+	int mt;
+	struct free_area *area;
+	struct page *page;
+
+	return __rmqueue_smallest_ex(zone, migratetype, bForPT);
+
+	#if 0
+	for (mt = 0; mt < MIGRATE_TYPES; my++) { // for each MT
+		if (list_empty(list)) continue;
+
+		page = __rmqueue_smallest_ex(zone, mt, bForPT);
+		if (page) return page;
+	}
+
+	return NULL;
+	#endif
+}
+#endif
+
+#ifdef YMH_USE_SEPARATE_BLOCKS
+// Find a page that does not belong to PT_BLOCK or NORMAL_BLOCK (depending on bForPT)
+// it may return NULL when OOM...don't worry...for now...or forever... #:)
+static /*inline*/ struct page *getPageNotFromPageset(struct zone *zone, int migratetype, int bForPT, int starting_order) {
+	unsigned int current_order;
+	struct free_area *area;
+	struct page *page;
+	struct list_head *list;
+	unsigned long long blockAddr;
+	unsigned long long pageAddr;
+	// int bBlock;
+	int cur_mt = migratetype, i;
+
+	// iterate order: MT -> ORDER -> PAGE:
+	// I took the above oreder because __rmqueue_smallest() searches a page by iterating orders with a given MT
+	// ALTERNATIVE order:  ORDER -> MT -> PAGE
+	i = 0;
+	while(1) { // LOOP-1 for iterating MT
+		for (current_order = starting_order; current_order < MAX_ORDER; ++current_order) {	// LOOP-2 for iterating ORDERs with MT
+			area = &(zone->free_area[current_order]);
+			list = &area->free_list[cur_mt];
+			page = list_first_entry_or_null(list, struct page, lru);
+
+			while(1) {	// LOOP-3 for iterating pages with MT and ORDER
+				if (!page || &page->lru == list) { // empty or iterated all nodes-> move to the next order
+					page = NULL;
+					break;	
+				}
+				pageAddr = (unsigned long long) page_address(page);
+
+				// we have a candidate page, let's check it!
+				if (bForPT) {	// page must NOT belong to NORMAL_BLOCK
+					blockAddr = isInNormalBlockRange(pageAddr);
+					if (blockAddr == 0ULL) {
+						// yes not in NORMAL_BLOCK
+						#if 0 // <--- will add after return
+						blockAddr = findOA(pageAddr, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/);
+						if (bBlock)  // page in a block. So, register the block as PT_BLOCK
+							addBlockNoDup(blockAddr, &blocksForPTP_LIVE, pageAddr);
+							// addBlockNoDup(blockAddr, blocksForPT, &idx_blocksForPT);
+						#endif
+						break;
+					} /*else {
+						myprintk("Sorry, page_vaddr(0x%llX) is in a block(0x%llX)\n", pageAddr, blockAddr);
+					}*/
+				} else {		// page must NOT belong to PT_BLOCK
+					// if (!isInBlockRange(pageAddr, blocksForPTP_LIVE.blocks, blocksForPTP_LIVE.nrBlocks)) { 
+					// blockAddr = isInBlockRange(pageAddr, blocksForPTP_LIVE.blocks, blocksForPTP_LIVE.nrBlocks);
+					blockAddr = isInPTPBlockRange(pageAddr);
+					if (blockAddr == 0ULL) {
+						// yes not in PT_BLOCK
+						#if 0 // <--- will add after return
+						blockAddr = findOA(pageAddr, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/);
+						if (bBlock)  // page in a block. So, register the block as NORMAL_BLOCK
+							addBlockNoDup(blockAddr, &blocksForNormalPage_LIVE, pageAddr);
+							// addBlockNoDup(blockAddr, blocksForNonPT, &idx_blocksForNonPT);
+						#endif
+						break;
+					}
+				}
+
+				// the page is not in PT_BLOCK 		(bForPT = 1)
+				// the page is not in NORMAL_BLOCK 	(bForPT = 0)
+				// visit the next node
+				page = list_first_entry(&page->lru, struct page, lru);
+			}
+
+			if (page) {
+				break; // we found a page not in the opposite block
+			}
+		}
+
+		if (page) break; // we found a page not in the opposite block
+		cur_mt = fallbacks[migratetype][i++];
+		if (cur_mt == MIGRATE_TYPES) break;
+	}
+
+	if (page) {
+		list_del(&page->lru);
+		rmv_page_order(page);
+		area->nr_free--;
+		migratetype = cur_mt;
+		expand(zone, page, starting_order, current_order, area, migratetype);
+		set_pcppage_migratetype(page, migratetype);
+	}
+
+	return page;
+}
+
+static struct page *getPageInSeparateBlocks(struct page *page, gfp_t gfp_flags, 
+	struct list_head *list, struct zone *zone, 
+	int migratetype, int *bFromPageset) {
+
+	unsigned long long addr;
+	unsigned long long blockAddr;
+	int bBlock;
+	unsigned int addedResult;
+	int block_idx, page_idx;
+
+	*bFromPageset = 1;
+
+	if (!page) myprintk("PAGE is NULL\n");
+	else {
+		// Separate nomal pages from PTPs.
+		// A page not for a page table must not in a block containing a table.
+		while(1) {
+			addr = (unsigned long long) page_address(page);
+			if ( gfp_flags & ___GFP_YMH_PTP ) { // pagetalbe page - PGD/PUD/PMD/PT
+				blockAddr = isInNormalBlockRange(addr);
+				if ( blockAddr == 0ULL ) {	// check if a pagetable page belongs to a normal_block
+					if (list == &page->lru) { // cannot find :(
+						page = getPageNotFromPageset(zone, migratetype, 1 /*bForPT*/, 0 /*starting order*/);
+						if (!page) panic("CANNOT FIND A PAGE NOT FROM PCP for PTP\n");
+						addr = (unsigned long long) page_address(page);
+						*bFromPageset = 0;
+
+						// double check, a PTP must not belong to Normal Page
+						if ( isInNormalBlockRange(addr) ) 
+							panic("NOT FROM PAGESET FAILED for PTP");
+					} 
+					blockAddr = findOA(addr, 1 /*bKaddr*/, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+
+					if (bBlock) {	// add the block to blocksForPT
+						addedResult = addBlockNoDup(blockAddr, &blocksForPTP_LIVE, addr, &block_idx, &page_idx);
+					} //else myprintk("PTP (0x%llX) not in a block\n", addr);
+					// }
+
+					break;
+				} //else if (0) myprintk("Pagetable page @ 0x%llX(=page @ 0x%llX) is in a block @ 0x%llX for normal pages try(%d)\n", addr, (unsigned long long) page, blockAddr, try);
+				// break;
+			} else {	
+				// NORMAL PAGE
+				blockAddr = isInPTPBlockRange(addr);
+				if ( blockAddr == 0ULL ) {	// Yes, not in PT_BLOCK
+					if (list == &page->lru) {	// cannot find :(
+						page = getPageNotFromPageset(zone, migratetype, 0 /*bForPT*/, 0 /*starting order*/);
+						if (!page) panic("CANNOT FIND A PAGE NOT FROM PCP for NORMAL\n");
+						addr = (unsigned long long) page_address(page);
+						*bFromPageset = 0;
+
+						if ( isInPTPBlockRange(addr) ) 
+							panic("NOT FROM PAGESET FAILED for Normal pages");
+					} 
+					blockAddr = findOA(addr, 1 /*bKaddr*/, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+
+					if (bBlock) {	// add the block to blocksForNonPT
+						addedResult = addBlockNoDup(blockAddr, &blocksForNormalPage_LIVE, addr, &block_idx, &page_idx);
+					} //else pr_emerg("ADD_PAGE Normal (0x%llX) not in a block\n", addr);
+					// }
+
+					break;
+				} //else myprintk("Normal page @ 0x%llX is in a block @ 0x%llX for PTPs try(%d)\n", addr, blockAddr, try);
+			}
+		
+			// re-find a page
+			page = list_first_entry(&page->lru, struct page, lru);
+		}
+
+	}
+
+	return page;
+}
+#endif /*YMH_USE_SEPARATE_BLOCKS */
+
+unsigned int main_hit = 0;
+
 /*
  * Allocate a page from the given zone. Use pcplists for order-0 allocations.
  */
@@ -2586,6 +3332,11 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 {
 	unsigned long flags;
 	struct page *page;
+	#ifdef YMH_USE_SEPARATE_BLOCKS
+	struct page *newPage = NULL;
+	int bFromPageset = 1;
+	int try = 1;
+	#endif /* YMH_USE_SEPARATE_BLOCKS */
 	bool cold = ((gfp_flags & __GFP_COLD) != 0);
 
 	if (likely(order == 0)) {
@@ -2597,21 +3348,41 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 			pcp = &this_cpu_ptr(zone->pageset)->pcp;
 			list = &pcp->lists[migratetype];
 			if (list_empty(list)) {
+
 				pcp->count += rmqueue_bulk(zone, 0,
 						pcp->batch, list,
-						migratetype, cold);
+						migratetype, cold, gfp_flags);
 				if (unlikely(list_empty(list)))
 					goto failed;
 			}
 
 			if (cold)
 				page = list_last_entry(list, struct page, lru);
-			else
+			else {
 				page = list_first_entry(list, struct page, lru);
+			}
 
-			list_del(&page->lru);
-			pcp->count--;
+			#ifdef YMH_USE_SEPARATE_BLOCKS
+			spin_lock(&zone->lock);
+			newPage  = getPageInSeparateBlocks(page, gfp_flags, list, zone, migratetype, &bFromPageset);
+			spin_unlock(&zone->lock);
 
+			if (bFromPageset) {
+				// if it is from the pageset, continue the exisintg code
+				page = newPage;
+			#endif /* YMH_USE_SEPARATE_BLOCKS */
+				list_del(&page->lru);
+				pcp->count--;
+			#ifdef YMH_USE_SEPARATE_BLOCKS
+			} else {
+				// if it is from slow path, use mine:)
+				// myprintk("Separate-blocks works! :) newPage(0x%llX) page(0x%llX)\n", newPage, page);
+				page = newPage;
+				break;	// don't go to check_new_pcp
+			}
+
+			try++;
+			#endif /* YMH_USE_SEPARATE_BLOCKS */
 		} while (check_new_pcp(page));
 	} else {
 		/*
@@ -2623,13 +3394,16 @@ struct page *buffered_rmqueue(struct zone *preferred_zone,
 
 		do {
 			page = NULL;
+			main_hit = ((main_hit >> 8) + 1) << 8;
 			if (alloc_flags & ALLOC_HARDER) {
-				page = __rmqueue_smallest(zone, order, MIGRATE_HIGHATOMIC);
+				page = __rmqueue_smallest(zone, order, MIGRATE_HIGHATOMIC, gfp_flags);
+				main_hit |= 1;
 				if (page)
 					trace_mm_page_alloc_zone_locked(page, order, migratetype);
 			}
-			if (!page)
-				page = __rmqueue(zone, order, migratetype);
+			if (!page) {
+				page = __rmqueue(zone, order, migratetype, gfp_flags);
+			}
 		} while (page && check_new_pages(page, order));
 		spin_unlock(&zone->lock);
 		if (!page)
@@ -2950,6 +3724,12 @@ try_this_zone:
 		page = buffered_rmqueue(ac->preferred_zoneref->zone, zone, order,
 				gfp_mask, alloc_flags, ac->migratetype);
 		if (page) {
+			unsigned long long vaddr = (unsigned long long) page_address(page);
+			unsigned long long blockAddr;
+			int bBlock;
+
+			blockAddr = findOA(vaddr, 1 /*bKaddr*/, "", "", 0 /*bCheckAP*/, &bBlock, 1 /*bSilent*/, 1 /*bUseMyprintk*/);
+			if (blockAddr == -1) myprintk("[before prep] page(0x%llX) is not mapped\n", vaddr);
 			prep_new_page(page, order, gfp_mask, alloc_flags);
 
 			/*
@@ -3722,7 +4502,7 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 			ac.nodemask = &cpuset_current_mems_allowed;
 	}
 
-	gfp_mask &= gfp_allowed_mask;
+	gfp_mask &= (gfp_allowed_mask | ___GFP_YMH_ALL);
 
 	lockdep_trace_alloc(gfp_mask);
 
@@ -3762,8 +4542,9 @@ retry_cpuset:
 
 	/* First allocation attempt */
 	page = get_page_from_freelist(alloc_mask, order, alloc_flags, &ac);
-	if (likely(page))
+	if (likely(page)){
 		goto out;
+	}
 
 	/*
 	 * Runtime PM, block IO and its error handling path can deadlock
@@ -3837,8 +4618,15 @@ EXPORT_SYMBOL(get_zeroed_page);
 void __free_pages(struct page *page, unsigned int order)
 {
 	if (put_page_testzero(page)) {
-		if (order == 0)
+		if (order == 0) {
+			#ifdef YMH_USE_SEPARATE_BLOCKS
+			if ( removePageAuto((unsigned long long) page_to_virt(page)) ) {
+				pr_emerg("###YMH### WRONG!!! Cannot delete page (0x%016llX)\n", (unsigned long long) page_to_virt(page));
+				panic("__FREE_PAGES");
+			} // else pr_emerg("###YMH### a page is deleted :)\n");
+			#endif
 			free_hot_cold_page(page, false);
+		}
 		else
 			__free_pages_ok(page, order);
 	}
